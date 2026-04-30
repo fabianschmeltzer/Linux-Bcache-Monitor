@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
-import curses, time, subprocess, os
+import curses, time, subprocess, os, sys, urllib.request
 from collections import deque
 
+__version__ = "0.1.0"
+
+# URLs can be overridden for your publish target, e.g. GitHub raw links.
+VERSION_URL = os.environ.get("BCACHE_MONITOR_VERSION_URL", "")
+SCRIPT_URL = os.environ.get("BCACHE_MONITOR_SCRIPT_URL", "")
 BCACHE="/sys/block/bcache0/bcache"
 HISTORY=200
 
@@ -27,6 +32,66 @@ def safe_addstr(stdscr,y,x,text,color=0):
 def read(p):
     try: return open(p).read().strip()
     except: return "0"
+
+def parse_version(v):
+    try:
+        return tuple(int(part) for part in v.strip().split("."))
+    except:
+        return (0,)
+
+def read_remote_text(url):
+    if not url:
+        return ""
+    try:
+        with urllib.request.urlopen(url, timeout=3) as r:
+            return r.read().decode("utf-8").strip()
+    except:
+        return ""
+
+def self_update_if_needed():
+    remote_version = read_remote_text(VERSION_URL)
+    if not remote_version:
+        return False
+
+    if parse_version(remote_version) <= parse_version(__version__):
+        return False
+
+    script_content = read_remote_text(SCRIPT_URL)
+    if not script_content.startswith("#!/usr/bin/env python3"):
+        return False
+
+    script_path = os.path.realpath(__file__)
+    backup_path = f"{script_path}.bak"
+
+    try:
+        with open(script_path, "r", encoding="utf-8") as src:
+            old_content = src.read()
+
+        with open(backup_path, "w", encoding="utf-8") as backup:
+            backup.write(old_content)
+
+        with open(script_path, "w", encoding="utf-8") as dst:
+            dst.write(script_content)
+
+        os.chmod(script_path, 0o755)
+        os.execv(script_path, [script_path] + sys.argv[1:])
+    except:
+        try:
+            if os.path.exists(backup_path):
+                with open(backup_path, "r", encoding="utf-8") as backup:
+                    restore = backup.read()
+                with open(script_path, "w", encoding="utf-8") as dst:
+                    dst.write(restore)
+        except:
+            pass
+    finally:
+        try:
+            if os.path.exists(backup_path):
+                os.remove(backup_path)
+        except:
+            pass
+
+    return False
 
 def dirty_val():
     try:
@@ -162,6 +227,7 @@ def draw(stdscr):
         time.sleep(1)
 
 def main():
+    self_update_if_needed()
     curses.wrapper(init)
 
 def init(stdscr):
