@@ -115,7 +115,12 @@ def self_update_if_needed():
         return False
 
     if UPDATE_SHA256_URL:
-        expected_hash = read_remote_text(UPDATE_SHA256_URL).split()[0].strip().lower()
+        expected_hash_response = read_remote_text(UPDATE_SHA256_URL).strip()
+        expected_hash_tokens = expected_hash_response.split()
+        if not expected_hash_tokens:
+            print_update_event("Update abgebrochen: SHA256-Datei leer/ungültig")
+            return False
+        expected_hash = expected_hash_tokens[0].strip().lower()
         actual_hash = hashlib.sha256(script_bytes).hexdigest()
         if not expected_hash:
             print_update_event("Update abgebrochen: SHA256-Datei leer/ungültig")
