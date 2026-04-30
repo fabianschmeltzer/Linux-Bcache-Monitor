@@ -9,6 +9,13 @@ VERSION_URL = os.environ.get("BCACHE_MONITOR_VERSION_URL", "")
 SCRIPT_URL = os.environ.get("BCACHE_MONITOR_SCRIPT_URL", "")
 BCACHE="/sys/block/bcache0/bcache"
 HISTORY=200
+TREND_WINDOW=30
+EFF_WARN_THRESHOLD=70.0
+EFF_CRITICAL_THRESHOLD=50.0
+MISS_HIT_RATIO_WARN=0.75
+MISS_HIT_RATIO_CRITICAL=1.10
+MISS_TREND_WARN=1.20
+MISS_TREND_CRITICAL=1.50
 
 TARGETS = {
     "nextcloud_app",
@@ -178,6 +185,68 @@ def docker():
     except:
         return []
 
+# ---------- GRAPH (AREA STYLE) ----------
+
+
+
+def status_from_metrics(eff, hps, mps, miss_window):
+    ratio = (mps / hps) if hps > 0 else (float("inf") if mps > 0 else 0.0)
+
+    trend = 1.0
+    if len(miss_window) >= 6:
+        half = len(miss_window) // 2
+        first_avg = sum(list(miss_window)[:half]) / max(half, 1)
+        second_avg = sum(list(miss_window)[half:]) / max(len(miss_window) - half, 1)
+        if first_avg <= 0:
+            trend = float("inf") if second_avg > 0 else 1.0
+        else:
+            trend = second_avg / first_avg
+
+    status = "OK"
+    color = 2
+    reasons = []
+
+    if eff < EFF_CRITICAL_THRESHOLD:
+        status = "CRITICAL"
+        color = 1
+        reasons.append(f"eff {eff:.0f}%")
+    elif eff < EFF_WARN_THRESHOLD:
+        if status != "CRITICAL":
+            status = "WARN"
+            color = 3
+        reasons.append(f"eff {eff:.0f}%")
+
+    if ratio >= MISS_HIT_RATIO_CRITICAL:
+        status = "CRITICAL"
+        color = 1
+        reasons.append(f"miss/hit {ratio:.2f}")
+    elif ratio >= MISS_HIT_RATIO_WARN and status == "OK":
+        status = "WARN"
+        color = 3
+        reasons.append(f"miss/hit {ratio:.2f}")
+
+    if trend >= MISS_TREND_CRITICAL:
+        status = "CRITICAL"
+        color = 1
+        reasons.append("miss trend ↑")
+    elif trend >= MISS_TREND_WARN and status == "OK":
+        status = "WARN"
+        color = 3
+        reasons.append("miss trend ↑")
+
+    if not reasons:
+        reasons.append("stable")
+
+    return status, color, ", ".join(reasons)
+def draw_area_graph(stdscr,data,y,x,w,h,color):
+    if len(data)<2: return
+    d=list(data)[-w:]
+    maxv=max(d) if max(d)>0 else 1
+
+    for i,val in enumerate(d):
+        height=int((val/maxv)*(h-1))
+        for j in range(height):
+            safe_addstr(stdscr,y+h-j,x+i,"█",color)
 # ---------- GRAPH ----------
 
 def draw_line_graph(stdscr, data, y, x, w, h, color, maxv):
@@ -225,6 +294,7 @@ def draw(stdscr):
 
     hits=deque(maxlen=HISTORY)
     miss=deque(maxlen=HISTORY)
+    miss_trend=deque(maxlen=TREND_WINDOW)
 
     ph,pm=stats()
     pt=time.time()
@@ -256,6 +326,7 @@ def draw(stdscr):
 
         hits.append(hps)
         miss.append(mps)
+        miss_trend.append(mps)
 
         eff=h0/(h0+m0)*100 if (h0+m0) else 0
         dirty_bytes=dirty_val()
@@ -288,6 +359,8 @@ def draw(stdscr):
         safe_addstr(stdscr, graph_y + graph_h + 1, graph_x, f"last {HISTORY}s", 4)
 
         # -------- STATUS --------
+        status,color,reason=status_from_metrics(eff,hps,mps,miss_trend)
+        safe_addstr(stdscr,4+graph_h+1,2,f"STATUS: {status} ({reason})",color)
         status="OK"
         color=2
         if mps > hps:
