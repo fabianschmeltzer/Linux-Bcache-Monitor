@@ -2,7 +2,7 @@
 import curses, time, subprocess, os, sys, urllib.request, glob
 from collections import deque
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 # URLs can be overridden for your publish target, e.g. GitHub raw links.
 VERSION_URL = os.environ.get("BCACHE_MONITOR_VERSION_URL", "https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monitor/main/VERSION")
