@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-import curses, time, subprocess, os, sys, urllib.request, glob
+import curses, time, subprocess, os, sys, urllib.request, glob, hashlib
 from collections import deque
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 
 # URLs can be overridden for your publish target, e.g. GitHub raw links.
 VERSION_URL = os.environ.get("BCACHE_MONITOR_VERSION_URL", "https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monitor/main/VERSION")
 SCRIPT_URL = os.environ.get("BCACHE_MONITOR_SCRIPT_URL", "https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monitor/main/bcache-monitor")
-BCACHE="/sys/block/bcache0/bcache"
+BCACHE_ENV_DEVICE = os.environ.get("BCACHE_MONITOR_DEVICE", "").strip()
+FIXED_MAX_PS = int(os.environ.get("BCACHE_MONITOR_MAX_PS", "0") or 0)
+DOCKER_REFRESH_SECONDS = float(os.environ.get("BCACHE_MONITOR_DOCKER_REFRESH_SECONDS", "4"))
+UPDATE_SHA256_URL = os.environ.get("BCACHE_MONITOR_SHA256_URL", "").strip()
 HISTORY=240
 TREND_WINDOW=30
 EFF_WARN_THRESHOLD=70.0
@@ -36,6 +39,20 @@ TARGETS = {
     "piwigo"
 }
 
+def discover_bcache_device():
+    candidates = sorted(glob.glob("/sys/block/*/bcache"))
+    if not candidates:
+        return None, []
+    devices = [os.path.basename(os.path.dirname(c)) for c in candidates]
+    if BCACHE_ENV_DEVICE:
+        if BCACHE_ENV_DEVICE in devices:
+            return f"/sys/block/{BCACHE_ENV_DEVICE}/bcache", devices
+        return None, devices
+    return candidates[0], devices
+
+BCACHE, BCACHE_DEVICES = discover_bcache_device()
+ACTIVE_DEVICE = os.path.basename(os.path.dirname(BCACHE)) if BCACHE else "N/A"
+
 # ---------- SAFE DRAW ----------
 
 def safe_addstr(stdscr,y,x,text,color=0):
@@ -49,8 +66,10 @@ def safe_addstr(stdscr,y,x,text,color=0):
 # ---------- HELPERS ----------
 
 def read(p):
-    try: return open(p).read().strip()
-    except: return "0"
+    try:
+        return open(p).read().strip()
+    except (FileNotFoundError, PermissionError, OSError):
+        return None
 
 def parse_version(v):
     try:
@@ -67,6 +86,15 @@ def read_remote_text(url):
     except:
         return ""
 
+def read_remote_bytes(url):
+    if not url:
+        return b""
+    try:
+        with urllib.request.urlopen(url, timeout=3) as r:
+            return r.read()
+    except:
+        return b""
+
 def print_update_event(message):
     ts = time.strftime("%H:%M:%S")
     print(f"[bcache-monitor][{ts}] {message}", flush=True)
@@ -81,11 +109,32 @@ def self_update_if_needed():
 
     print_update_event(f"Update verfügbar: {__version__} -> {remote_version}")
 
-    script_content = read_remote_text(SCRIPT_URL)
+    script_bytes = read_remote_bytes(SCRIPT_URL)
+    if not script_bytes:
+        print_update_event("Update abgebrochen: Script konnte nicht geladen werden")
+        return False
+
+    if UPDATE_SHA256_URL:
+        expected_hash_response = read_remote_text(UPDATE_SHA256_URL).strip()
+        expected_hash_tokens = expected_hash_response.split()
+        if not expected_hash_tokens:
+            print_update_event("Update abgebrochen: SHA256-Datei leer/ungültig")
+            return False
+        expected_hash = expected_hash_tokens[0].strip().lower()
+        actual_hash = hashlib.sha256(script_bytes).hexdigest()
+        if not expected_hash:
+            print_update_event("Update abgebrochen: SHA256-Datei leer/ungültig")
+            return False
+        if expected_hash != actual_hash:
+            print_update_event("Update abgebrochen: SHA256-Prüfung fehlgeschlagen")
+            return False
+        print_update_event("SHA256-Prüfung erfolgreich")
+
+    script_content = script_bytes.decode("utf-8", errors="replace")
     if not script_content.startswith("#!/usr/bin/env python3"):
         return False
 
-    script_size = len(script_content.encode("utf-8"))
+    script_size = len(script_bytes)
     if script_size < MIN_SCRIPT_SIZE_BYTES or script_size > MAX_SCRIPT_SIZE_BYTES:
         print_update_event("Update abgebrochen: ungültige Scriptgröße")
         return False
@@ -179,6 +228,8 @@ def format_dirty_value(dirty_bytes):
 
 
 def dirty_val():
+    if not BCACHE:
+        return None
     return parse_sysfs_size_bytes(read(f"{BCACHE}/dirty_data"))
 
 def discover_bcache_device():
@@ -210,14 +261,22 @@ def stats():
     for r,d,_ in os.walk("/sys/fs/bcache"):
         if "stats_total" in d:
             p=os.path.join(r,"stats_total")
-            return int(read(f"{p}/cache_hits")),int(read(f"{p}/cache_misses"))
-    return 0,0
+            h = read(f"{p}/cache_hits")
+            m = read(f"{p}/cache_misses")
+            if h is None or m is None:
+                return None, None
+            return int(h), int(m)
+    return None, None
 
 def docker():
     try:
-        raw = subprocess.getoutput(
-            "docker stats --no-stream --format '{{.Name}}|{{.CPUPerc}}|{{.MemPerc}}'"
-        ).split("\n")
+        cp = subprocess.run(
+            ["docker", "stats", "--no-stream", "--format", "{{.Name}}|{{.CPUPerc}}|{{.MemPerc}}"],
+            capture_output=True, text=True, timeout=1.5, check=False
+        )
+        if cp.returncode != 0:
+            return [], "UNAVAILABLE"
+        raw = cp.stdout.splitlines()
 
         res=[]
         for l in raw:
@@ -226,9 +285,9 @@ def docker():
             n,c,m=p
             if n not in TARGETS: continue
             res.append((n,float(c.replace("%","")),float(m.replace("%",""))))
-        return res
-    except:
-        return []
+        return res, "OK"
+    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+        return [], "UNAVAILABLE"
 
 # ---------- GRAPH (AREA STYLE) ----------
 
@@ -336,6 +395,17 @@ def pct_change(current, baseline):
         return 0.0
     return ((current - baseline) / baseline) * 100.0
 
+def trend_arrow(current, baseline):
+    if baseline <= 0 and current > 0:
+        return "↑"
+    if baseline <= 0:
+        return "→"
+    if current > baseline:
+        return "↑"
+    if current < baseline:
+        return "↓"
+    return "→"
+
 # ---------- MAIN ----------
 
 def draw(stdscr):
@@ -358,11 +428,28 @@ def draw(stdscr):
         BCACHE = device_path
 
     ph,pm=stats()
+    if ph is None or pm is None:
+        ph, pm = 0, 0
     pt=time.time()
+    docker_cache = []
+    docker_state = "UNAVAILABLE"
+    docker_last = 0.0
+    graph_scale = 1.0
 
     while True:
         stdscr.erase()
         maxy,maxx=stdscr.getmaxyx()
+
+        if not BCACHE:
+            safe_addstr(stdscr, 0, 0, "No bcache device found (set BCACHE_MONITOR_DEVICE)", 1)
+            if BCACHE_DEVICES:
+                safe_addstr(stdscr, 1, 0, f"Available: {', '.join(BCACHE_DEVICES)}", 3)
+            safe_addstr(stdscr, 2, 0, "Q=quit")
+            stdscr.refresh()
+            if stdscr.getch() in [ord('q'),ord('Q')]:
+                break
+            time.sleep(1)
+            continue
 
         if maxy < 12 or maxx < 48:
             safe_addstr(stdscr, 0, 0, "BCACHE OBS")
@@ -389,6 +476,9 @@ def draw(stdscr):
             continue
 
         h0,m0=stats()
+        sysfs_ok = not (h0 is None or m0 is None)
+        if not sysfs_ok:
+            h0, m0 = ph, pm
         now=time.time()
         dt=max(now-pt,0.5)
 
@@ -406,9 +496,7 @@ def draw(stdscr):
         dirty_display=format_dirty_value(dirty_bytes)
 
         # -------- HEADER --------
-        safe_addstr(stdscr,0,2,f"BCACHE OBSERVABILITY v{__version__} | DEVICE {device_name}",4)
-        if device_hint:
-            safe_addstr(stdscr,1,2,device_hint,3)
+        safe_addstr(stdscr,0,2,f"BCACHE OBSERVABILITY v{__version__} | DEVICE {ACTIVE_DEVICE}",4)
 
         # -------- TOP BAR --------
         ratio = (mps / hps) if hps > 0 else (float("inf") if mps > 0 else 0.0)
@@ -420,13 +508,17 @@ def draw(stdscr):
         graph_w = max(20, maxx-14)
         graph_y = 4
         graph_x = 10
-        maxv = max(max(hits) if hits else 0, max(miss) if miss else 0, 1)
+        raw_maxv = max(max(hits) if hits else 0, max(miss) if miss else 0, 1)
+        target_maxv = FIXED_MAX_PS if FIXED_MAX_PS > 0 else raw_maxv
+        graph_scale = 0.35 * target_maxv + 0.65 * graph_scale
+        maxv = max(int(graph_scale), 1)
 
         draw_y_markers(stdscr, graph_y, graph_x - 1, graph_h, maxv)
         draw_line_graph(stdscr, miss, graph_y, graph_x, graph_w, graph_h, 1, maxv)
         draw_line_graph(stdscr, hits, graph_y, graph_x, graph_w, graph_h, 2, maxv)
         safe_addstr(stdscr, graph_y + graph_h, graph_x, "└" + ("─" * (graph_w - 1)), 4)
         safe_addstr(stdscr, graph_y - 1, graph_x, "M = red | H = green (lines show per-second load)", 4)
+        safe_addstr(stdscr, graph_y - 1, graph_x + 52, f"Y max: {maxv}/s", 4)
 
         avg_h = (sum(hits) / len(hits)) if hits else 0
         avg_m = (sum(miss) / len(miss)) if miss else 0
@@ -439,16 +531,23 @@ def draw(stdscr):
         # -------- STATUS --------
         status,color,reason=status_from_metrics(eff,hps,mps,miss_trend)
         safe_addstr(stdscr,4+graph_h+1,2,f"STATUS: {status} ({reason})",color)
+        eff_arrow = trend_arrow(eff, avg_h and (h0/(h0+m0)*100 if (h0+m0) else eff))
+        ratio_arrow = trend_arrow(mps, short_m if 'short_m' in locals() else avg_m)
+        safe_addstr(
+            stdscr,4+graph_h+2,2,
+            f"HEALTH: {status} | EFF {eff:.1f}%{eff_arrow} (crit<{EFF_CRITICAL_THRESHOLD:.0f}) | MISS/HIT {ratio_text}{ratio_arrow} (crit≥{MISS_HIT_RATIO_CRITICAL:.2f})",
+            color
+        )
         if len(hits) >= 10 and len(miss) >= 10:
             short_h = sum(list(hits)[-10:]) / 10
             short_m = sum(list(miss)[-10:]) / 10
         else:
             short_h = avg_h
             short_m = avg_m
-        safe_addstr(stdscr,graph_y+graph_h+2,2,f"10s AVG -> H:{short_h:.0f}/s  M:{short_m:.0f}/s  ΔMISS:{pct_change(short_m, avg_m):+.0f}% vs window",4)
+        safe_addstr(stdscr,graph_y+graph_h+3,2,f"10s AVG -> H:{short_h:.0f}/s  M:{short_m:.0f}/s  ΔMISS:{pct_change(short_m, avg_m):+.0f}% vs window",4)
 
         # -------- CONTAINERS --------
-        y = graph_y+graph_h+4
+        y = graph_y+graph_h+5
         safe_addstr(stdscr,y,2,"CACHE NUMBERS",4)
         y += 1
         safe_addstr(stdscr,y,2,f"Total Hits:   {h0:,}")
@@ -463,16 +562,28 @@ def draw(stdscr):
         safe_addstr(stdscr,y,2,"CONTAINERS",4)
         y+=1
 
-        for name,cpu,mem in docker():
+        if now - docker_last >= DOCKER_REFRESH_SECONDS:
+            docker_cache, docker_state = docker()
+            docker_last = now
+
+        safe_addstr(stdscr,y,32,f"DATA: SYSFS {'OK' if sysfs_ok else 'MISSING'} | DOCKER {docker_state}", 4)
+        y += 1
+        for name,cpu,mem in docker_cache:
             if y+1 >= maxy:
                 break
 
-            bar_cpu = "█"*int(cpu/5)
-            bar_mem = "█"*int(mem/5)
+            cpu_col = max(24, maxx // 3)
+            mem_col = max(cpu_col + 20, (maxx * 2) // 3)
+            cpu_room = max(0, mem_col - cpu_col - 10)
+            mem_room = max(0, maxx - mem_col - 12)
+            bar_cpu = "█" * (int((cpu / 100) * cpu_room) if cpu_room else 0)
+            bar_mem = "█" * (int((mem / 100) * mem_room) if mem_room else 0)
 
-            safe_addstr(stdscr,y,2,f"{name}")
-            safe_addstr(stdscr,y,30,f"C {cpu:4.1f}% {bar_cpu}",2)
-            safe_addstr(stdscr,y,55,f"R {mem:4.1f}% {bar_mem}",3)
+            max_name_len = max(6, cpu_col - 4)
+            disp_name = name if len(name) <= max_name_len else name[:max_name_len-1] + "…"
+            safe_addstr(stdscr,y,2,disp_name)
+            safe_addstr(stdscr,y,cpu_col,f"C {cpu:4.1f}% {bar_cpu}",2)
+            safe_addstr(stdscr,y,mem_col,f"R {mem:4.1f}% {bar_mem}",3)
 
             y+=1
 
