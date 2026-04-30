@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+import curses, time, subprocess, os
+from collections import deque
+
+BCACHE="/sys/block/bcache0/bcache"
+HISTORY=200
+
+TARGETS = {
+    "nextcloud_app",
+    "immich-server",
+    "immich-machine-learning",
+    "piwigo"
+}
+
+# ---------- SAFE DRAW ----------
+
+def safe_addstr(stdscr,y,x,text,color=0):
+    maxy,maxx = stdscr.getmaxyx()
+    if 0 <= y < maxy and 0 <= x < maxx:
+        try:
+            stdscr.addstr(y,x,text[:maxx-x-1],curses.color_pair(color))
+        except:
+            pass
+
+# ---------- HELPERS ----------
+
+def read(p):
+    try: return open(p).read().strip()
+    except: return "0"
+
+def dirty_val():
+    try:
+        return float(''.join(c for c in read(f"{BCACHE}/dirty_data") if c.isdigit() or c=='.'))
+    except:
+        return 0
+
+def stats():
+    for r,d,_ in os.walk("/sys/fs/bcache"):
+        if "stats_total" in d:
+            p=os.path.join(r,"stats_total")
+            return int(read(f"{p}/cache_hits")),int(read(f"{p}/cache_misses"))
+    return 0,0
+
+def docker():
+    try:
+        raw = subprocess.getoutput(
+            "docker stats --no-stream --format '{{.Name}}|{{.CPUPerc}}|{{.MemPerc}}'"
+        ).split("\n")
+
+        res=[]
+        for l in raw:
+            p=l.split("|")
+            if len(p)!=3: continue
+            n,c,m=p
+            if n not in TARGETS: continue
+            res.append((n,float(c.replace("%","")),float(m.replace("%",""))))
+        return res
+    except:
+        return []
+
+# ---------- GRAPH (AREA STYLE) ----------
+
+def draw_area_graph(stdscr,data,y,x,w,h,color):
+    if len(data)<2: return
+    d=list(data)[-w:]
+    maxv=max(d) if max(d)>0 else 1
+
+    for i,val in enumerate(d):
+        height=int((val/maxv)*(h-1))
+        for j in range(height):
+            safe_addstr(stdscr,y+h-j,x+i,"█",color)
+
+# ---------- MAIN ----------
+
+def draw(stdscr):
+    curses.curs_set(0)
+    stdscr.nodelay(True)
+
+    hits=deque(maxlen=HISTORY)
+    miss=deque(maxlen=HISTORY)
+
+    ph,pm=stats()
+    pt=time.time()
+
+    while True:
+        stdscr.erase()
+        maxy,maxx=stdscr.getmaxyx()
+
+        if maxy<20 or maxx<80:
+            safe_addstr(stdscr,0,0,"Resize Terminal")
+            stdscr.refresh()
+            time.sleep(1)
+            continue
+
+        # DATA
+        h0,m0=stats()
+        now=time.time()
+        dt=max(now-pt,0.5)
+
+        hps=int((h0-ph)/dt)
+        mps=int((m0-pm)/dt)
+
+        ph,pm,pt=h0,m0,now
+
+        hits.append(hps)
+        miss.append(mps)
+
+        eff=h0/(h0+m0)*100 if (h0+m0) else 0
+        dirty=dirty_val()
+
+        # -------- HEADER --------
+        safe_addstr(stdscr,0,2,"BCACHE OBSERVABILITY",4)
+
+        # -------- TOP BAR --------
+        safe_addstr(stdscr,2,2,f"EFF {eff:.1f}% | DIRTY {dirty:.1f}MB | H:{hps} M:{mps}")
+
+        # -------- GRAPH --------
+        graph_h = maxy//3
+        graph_w = maxx-4
+
+        # Hintergrund (Miss = rot)
+        draw_area_graph(stdscr,miss,4,2,graph_w,graph_h,1)
+        # Vordergrund (Hits = grün)
+        draw_area_graph(stdscr,hits,4,2,graph_w,graph_h,2)
+
+        safe_addstr(stdscr,4,2,"HITS (green) vs MISS (red)",4)
+
+        # -------- STATUS --------
+        status="OK"
+        color=2
+        if mps > hps:
+            status="HDD LOAD"
+            color=1
+
+        safe_addstr(stdscr,4+graph_h+1,2,f"STATUS: {status}",color)
+
+        # -------- CONTAINERS --------
+        y = 4+graph_h+3
+        safe_addstr(stdscr,y,2,"CONTAINERS",4)
+        y+=1
+
+        for name,cpu,mem in docker():
+            if y+1 >= maxy:
+                break
+
+            bar_cpu = "█"*int(cpu/5)
+            bar_mem = "█"*int(mem/5)
+
+            safe_addstr(stdscr,y,2,f"{name}")
+            safe_addstr(stdscr,y,30,f"C {cpu:4.1f}% {bar_cpu}",2)
+            safe_addstr(stdscr,y,55,f"R {mem:4.1f}% {bar_mem}",3)
+
+            y+=1
+
+        safe_addstr(stdscr,maxy-1,2,"Q=quit")
+
+        stdscr.refresh()
+
+        if stdscr.getch() in [ord('q'),ord('Q')]:
+            break
+
+        time.sleep(1)
+
+def main():
+    curses.wrapper(init)
+
+def init(stdscr):
+    curses.start_color()
+    curses.init_pair(1,curses.COLOR_RED,curses.COLOR_BLACK)
+    curses.init_pair(2,curses.COLOR_GREEN,curses.COLOR_BLACK)
+    curses.init_pair(3,curses.COLOR_YELLOW,curses.COLOR_BLACK)
+    curses.init_pair(4,curses.COLOR_CYAN,curses.COLOR_BLACK)
+    draw(stdscr)
+
+if __name__=="__main__":
+    main()
