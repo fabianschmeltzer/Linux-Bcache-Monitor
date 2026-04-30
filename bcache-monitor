@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-import curses, time, subprocess, os, sys, urllib.request, glob, hashlib
+import curses, time, subprocess, os, sys, urllib.request, glob
 from collections import deque
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"
 
 # URLs can be overridden for your publish target, e.g. GitHub raw links.
 VERSION_URL = os.environ.get("BCACHE_MONITOR_VERSION_URL", "https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monitor/main/VERSION")
@@ -10,7 +10,6 @@ SCRIPT_URL = os.environ.get("BCACHE_MONITOR_SCRIPT_URL", "https://raw.githubuser
 BCACHE_ENV_DEVICE = os.environ.get("BCACHE_MONITOR_DEVICE", "").strip()
 FIXED_MAX_PS = int(os.environ.get("BCACHE_MONITOR_MAX_PS", "0") or 0)
 DOCKER_REFRESH_SECONDS = float(os.environ.get("BCACHE_MONITOR_DOCKER_REFRESH_SECONDS", "4"))
-UPDATE_SHA256_URL = os.environ.get("BCACHE_MONITOR_SHA256_URL", "").strip()
 HISTORY=240
 TREND_WINDOW=30
 EFF_WARN_THRESHOLD=70.0
@@ -113,22 +112,6 @@ def self_update_if_needed():
     if not script_bytes:
         print_update_event("Update abgebrochen: Script konnte nicht geladen werden")
         return False
-
-    if UPDATE_SHA256_URL:
-        expected_hash_response = read_remote_text(UPDATE_SHA256_URL).strip()
-        expected_hash_tokens = expected_hash_response.split()
-        if not expected_hash_tokens:
-            print_update_event("Update abgebrochen: SHA256-Datei leer/ungültig")
-            return False
-        expected_hash = expected_hash_tokens[0].strip().lower()
-        actual_hash = hashlib.sha256(script_bytes).hexdigest()
-        if not expected_hash:
-            print_update_event("Update abgebrochen: SHA256-Datei leer/ungültig")
-            return False
-        if expected_hash != actual_hash:
-            print_update_event("Update abgebrochen: SHA256-Prüfung fehlgeschlagen")
-            return False
-        print_update_event("SHA256-Prüfung erfolgreich")
 
     script_content = script_bytes.decode("utf-8", errors="replace")
     if not script_content.startswith("#!/usr/bin/env python3"):
