@@ -232,6 +232,31 @@ def dirty_val():
         return None
     return parse_sysfs_size_bytes(read(f"{BCACHE}/dirty_data"))
 
+def discover_bcache_device():
+    candidates = []
+    for path in sorted(glob.glob("/sys/block/*/bcache")):
+        if os.path.isdir(path):
+            device = os.path.basename(os.path.dirname(path))
+            if device:
+                candidates.append((device, path))
+
+    if not candidates:
+        return None, None, "Kein bcache-Gerät gefunden (erwartet: /sys/block/*/bcache)."
+
+    if len(candidates) == 1:
+        device, path = candidates[0]
+        return device, path, ""
+
+    requested_device = os.environ.get("BCACHE_MONITOR_DEVICE", "").strip()
+    if requested_device:
+        for device, path in candidates:
+            if device == requested_device:
+                return device, path, ""
+
+    device, path = candidates[0]
+    hint = "Mehrere bcache-Geräte gefunden; nutze BCACHE_MONITOR_DEVICE=<name> für Auswahl."
+    return device, path, hint
+
 def stats():
     for r,d,_ in os.walk("/sys/fs/bcache"):
         if "stats_total" in d:
@@ -397,6 +422,11 @@ def draw(stdscr):
     miss=deque(maxlen=HISTORY)
     miss_trend=deque(maxlen=TREND_WINDOW)
 
+    device_name, device_path, device_hint = discover_bcache_device()
+    global BCACHE
+    if device_path:
+        BCACHE = device_path
+
     ph,pm=stats()
     if ph is None or pm is None:
         ph, pm = 0, 0
@@ -433,6 +463,18 @@ def draw(stdscr):
             continue
 
         # DATA
+        if not device_path:
+            safe_addstr(stdscr,0,2,f"BCACHE OBSERVABILITY v{__version__}",4)
+            safe_addstr(stdscr,2,2,"ERROR: Kein bcache-Gerät verfügbar.",1)
+            safe_addstr(stdscr,3,2,"Erwartet wird ein Pfad wie /sys/block/<device>/bcache.",3)
+            safe_addstr(stdscr,4,2,"Bitte prüfen, ob bcache aktiv ist und das Device eingebunden wurde.",3)
+            safe_addstr(stdscr,maxy-1,2,"Q=quit")
+            stdscr.refresh()
+            if stdscr.getch() in [ord('q'),ord('Q')]:
+                break
+            time.sleep(1)
+            continue
+
         h0,m0=stats()
         sysfs_ok = not (h0 is None or m0 is None)
         if not sysfs_ok:
