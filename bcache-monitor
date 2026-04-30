@@ -93,11 +93,66 @@ def self_update_if_needed():
 
     return False
 
-def dirty_val():
+def parse_sysfs_size_bytes(raw_value):
+    if raw_value is None:
+        return None
+
+    token = str(raw_value).strip()
+    if not token:
+        return None
+
+    token = token.replace(" ", "")
+    lower = token.lower()
+
+    i = 0
+    while i < len(lower) and (lower[i].isdigit() or lower[i] == "."):
+        i += 1
+
+    if i == 0:
+        return None
+
+    number = lower[:i]
+    suffix = lower[i:]
+
     try:
-        return float(''.join(c for c in read(f"{BCACHE}/dirty_data") if c.isdigit() or c=='.'))
+        value = float(number)
     except:
-        return 0
+        return None
+
+    units = {
+        "": 1,
+        "b": 1,
+        "k": 1024,
+        "kb": 1024,
+        "kib": 1024,
+        "m": 1024 ** 2,
+        "mb": 1024 ** 2,
+        "mib": 1024 ** 2,
+        "g": 1024 ** 3,
+        "gb": 1024 ** 3,
+        "gib": 1024 ** 3,
+    }
+
+    if suffix not in units:
+        return None
+
+    return int(value * units[suffix])
+
+
+def format_dirty_value(dirty_bytes):
+    if dirty_bytes is None:
+        return "N/A"
+
+    mib = dirty_bytes / (1024 ** 2)
+    if mib < 1024:
+        return f"{mib:.1f} MiB"
+
+    gib = dirty_bytes / (1024 ** 3)
+    return f"{gib:.1f} GiB"
+
+
+def dirty_val():
+    return parse_sysfs_size_bytes(read(f"{BCACHE}/dirty_data"))
 
 def stats():
     for r,d,_ in os.walk("/sys/fs/bcache"):
@@ -171,13 +226,14 @@ def draw(stdscr):
         miss.append(mps)
 
         eff=h0/(h0+m0)*100 if (h0+m0) else 0
-        dirty=dirty_val()
+        dirty_bytes=dirty_val()
+        dirty_display=format_dirty_value(dirty_bytes)
 
         # -------- HEADER --------
         safe_addstr(stdscr,0,2,"BCACHE OBSERVABILITY",4)
 
         # -------- TOP BAR --------
-        safe_addstr(stdscr,2,2,f"EFF {eff:.1f}% | DIRTY {dirty:.1f}MB | H:{hps} M:{mps}")
+        safe_addstr(stdscr,2,2,f"EFF {eff:.1f}% | DIRTY {dirty_display} | H:{hps} M:{mps}")
 
         # -------- GRAPH --------
         graph_h = maxy//3
