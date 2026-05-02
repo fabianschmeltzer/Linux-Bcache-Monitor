@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import curses, time, subprocess, os, sys, urllib.request, glob
+import curses, time, subprocess, os, sys, urllib.request, glob, json
 from collections import deque
 
 __version__ = "0.3.5"
@@ -31,12 +31,16 @@ def is_valid_version_string(value):
     return all(part.isdigit() for part in parts)
 
 
-TARGETS = {
-    "nextcloud_app",
-    "immich-server",
-    "immich-machine-learning",
-    "piwigo"
+DEFAULT_CONFIG = {
+    "containers": [
+        "nextcloud_app",
+        "immich-server",
+        "immich-machine-learning",
+        "piwigo",
+    ],
+    "bcache_device": "",
 }
+CONFIG_PATH = os.path.expanduser("~/.config/bcache-monitor/config.json")
 
 def discover_bcache_device():
     candidates = sorted(glob.glob("/sys/block/*/bcache"))
@@ -240,6 +244,96 @@ def discover_bcache_device():
     hint = "Mehrere bcache-Geräte gefunden; nutze BCACHE_MONITOR_DEVICE=<name> für Auswahl."
     return device, path, hint
 
+
+def default_config():
+    return {
+        "containers": list(DEFAULT_CONFIG["containers"]),
+        "bcache_device": DEFAULT_CONFIG["bcache_device"],
+    }
+
+
+def _sanitize_config(raw):
+    cfg = default_config()
+    if not isinstance(raw, dict):
+        return cfg
+
+    containers = raw.get("containers")
+    if isinstance(containers, list):
+        cleaned = []
+        seen = set()
+        for item in containers:
+            if not isinstance(item, str):
+                continue
+            name = item.strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            cleaned.append(name)
+        cfg["containers"] = cleaned
+
+    dev = raw.get("bcache_device")
+    if isinstance(dev, str):
+        cfg["bcache_device"] = dev.strip()
+
+    return cfg
+
+
+def load_config():
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as src:
+            return _sanitize_config(json.load(src)), ""
+    except FileNotFoundError:
+        cfg = default_config()
+        ok, msg = save_config(cfg)
+        return cfg, ("Config nicht gefunden; Defaults erstellt." if ok else f"Config fehlt ({msg})")
+    except PermissionError:
+        return default_config(), "Config nicht lesbar (Berechtigungen)."
+    except json.JSONDecodeError:
+        return default_config(), "Config defekt (JSON). Defaults genutzt."
+    except OSError as exc:
+        return default_config(), f"Config-Lesen fehlgeschlagen: {exc}"
+
+
+def save_config(config):
+    cfg = _sanitize_config(config)
+    directory = os.path.dirname(CONFIG_PATH)
+    temp_path = f"{CONFIG_PATH}.tmp"
+    try:
+        os.makedirs(directory, exist_ok=True)
+        with open(temp_path, "w", encoding="utf-8") as dst:
+            json.dump(cfg, dst, indent=2, ensure_ascii=False)
+            dst.write("\n")
+            dst.flush()
+            os.fsync(dst.fileno())
+        os.replace(temp_path, CONFIG_PATH)
+        return True, ""
+    except PermissionError:
+        return False, "Keine Schreibberechtigung für Config."
+    except OSError as exc:
+        return False, str(exc)
+    finally:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+
+
+def list_running_containers():
+    try:
+        cp = subprocess.run(
+            ["docker", "ps", "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=2.0, check=False
+        )
+        if cp.returncode != 0:
+            return [], f"ERR:{cp.returncode}"
+        names = [line.strip() for line in cp.stdout.splitlines() if line.strip()]
+        return names, "OK"
+    except subprocess.TimeoutExpired:
+        return [], "TIMEOUT"
+    except FileNotFoundError:
+        return [], "NOT INSTALLED"
+
 def stats():
     for r,d,_ in os.walk("/sys/fs/bcache"):
         if "stats_total" in d:
@@ -263,7 +357,7 @@ def _parse_percent(raw):
         return None
 
 
-def docker():
+def docker(selected_containers):
     try:
         cp = subprocess.run(
             ["docker", "stats", "--no-stream", "--format", "{{.Name}}|{{.CPUPerc}}|{{.MemPerc}}"],
@@ -278,7 +372,7 @@ def docker():
             if len(parts) != 3:
                 continue
             name, cpu_raw, mem_raw = parts
-            if name not in TARGETS:
+            if selected_containers and name not in selected_containers:
                 continue
 
             cpu = _parse_percent(cpu_raw)
@@ -291,7 +385,7 @@ def docker():
             return res, "OK"
 
         # docker reachable, but none of the monitored containers currently running
-        return [], "NO TARGETS"
+        return [], ("NO CONTAINERS" if selected_containers else "ALL (none running)")
     except subprocess.TimeoutExpired:
         return [], "TIMEOUT"
     except FileNotFoundError:
@@ -444,6 +538,55 @@ def draw(stdscr):
     docker_state = "UNAVAILABLE"
     docker_last = 0.0
     graph_scale = 1.0
+    config, config_notice = load_config()
+    selected_containers = list(config.get("containers", []))
+    if config.get("bcache_device"):
+        os.environ["BCACHE_MONITOR_DEVICE"] = config["bcache_device"]
+
+    def open_settings():
+        nonlocal selected_containers, config_notice
+        running, state = list_running_containers()
+        choices = sorted(set(running) | set(selected_containers))
+        selected = set(selected_containers)
+        idx = 0
+        while True:
+            stdscr.erase()
+            my, mx = stdscr.getmaxyx()
+            safe_addstr(stdscr, 0, 2, "SETTINGS: Container Auswahl", 4)
+            safe_addstr(stdscr, 1, 2, "Space=toggle  Enter=speichern  A=alle/keine  Esc=zurück")
+            safe_addstr(stdscr, 2, 2, f"docker ps: {state}", 4)
+            safe_addstr(stdscr, 3, 2, "Leere Auswahl = ALLE Container anzeigen", 3)
+            top = 5
+            if not choices:
+                safe_addstr(stdscr, top, 2, "Keine Container gefunden.", 1)
+            for i, name in enumerate(choices):
+                if top + i >= my - 2:
+                    break
+                marker = "[x]" if name in selected else "[ ]"
+                prefix = ">" if i == idx else " "
+                safe_addstr(stdscr, top + i, 2, f"{prefix} {marker} {name}", 2 if i == idx else 0)
+            stdscr.refresh()
+            ch = stdscr.getch()
+            if ch in [27, ord("q"), ord("Q")]:
+                return
+            if ch in [curses.KEY_UP, ord("k")] and choices:
+                idx = (idx - 1) % len(choices)
+            elif ch in [curses.KEY_DOWN, ord("j")] and choices:
+                idx = (idx + 1) % len(choices)
+            elif ch == ord(" ") and choices:
+                name = choices[idx]
+                if name in selected:
+                    selected.remove(name)
+                else:
+                    selected.add(name)
+            elif ch in [ord("a"), ord("A")]:
+                selected = set() if selected else set(choices)
+            elif ch in [10, 13]:
+                selected_containers = sorted(selected)
+                config["containers"] = selected_containers
+                ok, msg = save_config(config)
+                config_notice = "Config gespeichert." if ok else f"Config speichern fehlgeschlagen: {msg}"
+                return
 
     while True:
         stdscr.erase()
@@ -573,9 +716,12 @@ def draw(stdscr):
         y+=1
 
         if now - docker_last >= DOCKER_REFRESH_SECONDS:
-            docker_cache, docker_state = docker()
+            docker_cache, docker_state = docker(selected_containers)
             docker_last = now
 
+        selection_label = f"{len(selected_containers)} selected" if selected_containers else "ALL (empty selection)"
+        safe_addstr(stdscr, y, 2, f"Containers: {selection_label}", 4)
+        y += 1
         safe_addstr(stdscr,y,32,f"DATA: SYSFS {'OK' if sysfs_ok else 'MISSING'} | DOCKER {docker_state}", 4)
         y += 1
         for name,cpu,mem in docker_cache:
@@ -599,12 +745,18 @@ def draw(stdscr):
 
         if update_notice:
             safe_addstr(stdscr,maxy-2,2,update_notice,3)
-        safe_addstr(stdscr,maxy-1,2,"Q=quit")
+        if config_notice:
+            safe_addstr(stdscr,maxy-2,2,config_notice,3)
+        safe_addstr(stdscr,maxy-1,2,"Q=quit  S=settings")
 
         stdscr.refresh()
 
-        if stdscr.getch() in [ord('q'),ord('Q')]:
+        key = stdscr.getch()
+        if key in [ord('q'),ord('Q')]:
             break
+        if key in [ord('s'),ord('S')]:
+            open_settings()
+            docker_last = 0.0
 
         time.sleep(1)
 
