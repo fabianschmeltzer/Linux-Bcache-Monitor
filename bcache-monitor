@@ -347,11 +347,18 @@ def list_running_containers():
     return names, result["status"]
 
 
+def _normalize_container_name(name):
+    return str(name or "").strip().lstrip("/")
+
+
 def list_container_stats(selected_containers):
-    result = _run_command(
-        ["docker", "stats", "--no-stream", "--format", "{{.Name}}|{{.CPUPerc}}|{{.MemPerc}}"],
-        timeout=2.0
-    )
+    selected = {_normalize_container_name(name) for name in (selected_containers or []) if _normalize_container_name(name)}
+
+    command = ["docker", "stats", "--no-stream", "--format", "{{.Name}}|{{.CPUPerc}}|{{.MemPerc}}"]
+    if selected:
+        command.extend(sorted(selected))
+
+    result = _run_command(command, timeout=2.0)
     if not result["ok"]:
         return [], result["status"]
 
@@ -361,18 +368,19 @@ def list_container_stats(selected_containers):
         if len(parts) != 3:
             continue
         name, cpu_raw, mem_raw = parts
-        if selected_containers and name not in selected_containers:
+        normalized = _normalize_container_name(name)
+        if selected and normalized not in selected:
             continue
 
         cpu = _parse_percent(cpu_raw)
         mem = _parse_percent(mem_raw)
         if cpu is None or mem is None:
             continue
-        res.append((name, cpu, mem))
+        res.append((normalized or name, cpu, mem))
 
     if res:
         return res, "OK"
-    return [], ("NO CONTAINERS" if selected_containers else "ALL (none running)")
+    return [], ("NO CONTAINERS" if selected else "ALL (none running)")
 
 def stats():
     for r,d,_ in os.walk("/sys/fs/bcache"):
