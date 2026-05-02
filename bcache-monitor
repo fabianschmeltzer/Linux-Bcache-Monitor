@@ -42,20 +42,6 @@ DEFAULT_CONFIG = {
 }
 CONFIG_PATH = os.path.expanduser("~/.config/bcache-monitor/config.json")
 
-def discover_bcache_device():
-    candidates = sorted(glob.glob("/sys/block/*/bcache"))
-    if not candidates:
-        return None, []
-    devices = [os.path.basename(os.path.dirname(c)) for c in candidates]
-    if BCACHE_ENV_DEVICE:
-        if BCACHE_ENV_DEVICE in devices:
-            return f"/sys/block/{BCACHE_ENV_DEVICE}/bcache", devices
-        return None, devices
-    return candidates[0], devices
-
-BCACHE, BCACHE_DEVICES = discover_bcache_device()
-ACTIVE_DEVICE = os.path.basename(os.path.dirname(BCACHE)) if BCACHE else "N/A"
-
 # ---------- SAFE DRAW ----------
 
 def safe_addstr(stdscr,y,x,text,color=0):
@@ -219,30 +205,51 @@ def dirty_val():
         return None
     return parse_sysfs_size_bytes(read(f"{BCACHE}/dirty_data"))
 
-def discover_bcache_device():
+def discover_bcache_devices():
     candidates = []
     for path in sorted(glob.glob("/sys/block/*/bcache")):
         if os.path.isdir(path):
             device = os.path.basename(os.path.dirname(path))
             if device:
                 candidates.append((device, path))
+    return candidates
+
+
+def resolve_bcache_device(config_device=""):
+    candidates = discover_bcache_devices()
+    devices = [device for device, _ in candidates]
+    device_map = {device: path for device, path in candidates}
 
     if not candidates:
-        return None, None, "Kein bcache-Gerät gefunden (erwartet: /sys/block/*/bcache)."
+        return {
+            "device": None,
+            "path": None,
+            "source": "none",
+            "devices": devices,
+            "warning": "Kein bcache-Gerät gefunden (erwartet: /sys/block/*/bcache).",
+        }
 
-    if len(candidates) == 1:
-        device, path = candidates[0]
-        return device, path, ""
+    env_device = os.environ.get("BCACHE_MONITOR_DEVICE", "").strip()
+    config_device = (config_device or "").strip()
 
-    requested_device = os.environ.get("BCACHE_MONITOR_DEVICE", "").strip()
-    if requested_device:
-        for device, path in candidates:
-            if device == requested_device:
-                return device, path, ""
+    if config_device:
+        if config_device in device_map:
+            return {"device": config_device, "path": device_map[config_device], "source": "config", "devices": devices, "warning": ""}
+        first_device = devices[0]
+        return {
+            "device": first_device,
+            "path": device_map[first_device],
+            "source": "auto",
+            "devices": devices,
+            "warning": f"Gespeichertes Device '{config_device}' nicht gefunden; Auto-Fallback aktiv.",
+        }
 
-    device, path = candidates[0]
-    hint = "Mehrere bcache-Geräte gefunden; nutze BCACHE_MONITOR_DEVICE=<name> für Auswahl."
-    return device, path, hint
+    if env_device and env_device in device_map:
+        return {"device": env_device, "path": device_map[env_device], "source": "env", "devices": devices, "warning": ""}
+
+    first_device = devices[0]
+    warning = f"Env-Device '{env_device}' nicht gefunden; Auto-Fallback aktiv." if env_device else ""
+    return {"device": first_device, "path": device_map[first_device], "source": "auto", "devices": devices, "warning": warning}
 
 
 def default_config():
@@ -525,11 +532,6 @@ def draw(stdscr):
     miss=deque(maxlen=HISTORY)
     miss_trend=deque(maxlen=TREND_WINDOW)
 
-    device_name, device_path, device_hint = discover_bcache_device()
-    global BCACHE
-    if device_path:
-        BCACHE = device_path
-
     ph,pm=stats()
     if ph is None or pm is None:
         ph, pm = 0, 0
@@ -540,62 +542,104 @@ def draw(stdscr):
     graph_scale = 1.0
     config, config_notice = load_config()
     selected_containers = list(config.get("containers", []))
-    if config.get("bcache_device"):
-        os.environ["BCACHE_MONITOR_DEVICE"] = config["bcache_device"]
+    resolution = resolve_bcache_device(config.get("bcache_device", ""))
+    device_name = resolution["device"]
+    device_path = resolution["path"]
+    device_source = resolution["source"]
+    available_devices = resolution["devices"]
+    device_warning = resolution["warning"]
+    global BCACHE
+    BCACHE = device_path
+
+    def refresh_device_selection():
+        nonlocal resolution, device_name, device_path, device_source, available_devices, device_warning
+        global BCACHE
+        resolution = resolve_bcache_device(config.get("bcache_device", ""))
+        device_name = resolution["device"]
+        device_path = resolution["path"]
+        device_source = resolution["source"]
+        available_devices = resolution["devices"]
+        device_warning = resolution["warning"]
+        BCACHE = device_path
 
     def open_settings():
-        nonlocal selected_containers, config_notice
+        nonlocal selected_containers, config_notice, device_name, device_source, available_devices
         running, state = list_running_containers()
         choices = sorted(set(running) | set(selected_containers))
         selected = set(selected_containers)
+        device_choices = list(available_devices)
+        selected_device = config.get("bcache_device", "").strip()
         idx = 0
+        dev_idx = device_choices.index(selected_device) if selected_device in device_choices else 0
+        mode = "containers"
         while True:
             stdscr.erase()
             my, mx = stdscr.getmaxyx()
-            safe_addstr(stdscr, 0, 2, "SETTINGS: Container Auswahl", 4)
-            safe_addstr(stdscr, 1, 2, "Space=toggle  Enter=speichern  A=alle/keine  Esc=zurück")
+            safe_addstr(stdscr, 0, 2, "SETTINGS: Container + Device Auswahl", 4)
+            safe_addstr(stdscr, 1, 2, "Tab=Bereich  Space=toggle  Enter=speichern  A=alle/keine  Esc=zurück")
             safe_addstr(stdscr, 2, 2, f"docker ps: {state}", 4)
             safe_addstr(stdscr, 3, 2, "Leere Auswahl = ALLE Container anzeigen", 3)
+            safe_addstr(stdscr, 4, 2, "Device (Single-Select):", 4 if mode == "device" else 0)
             top = 5
+            if not device_choices:
+                safe_addstr(stdscr, top, 2, "Keine bcache-Devices gefunden.", 1)
+            for i, name in enumerate(device_choices):
+                marker = "(*)" if name == selected_device else "( )"
+                prefix = ">" if mode == "device" and i == dev_idx else " "
+                safe_addstr(stdscr, top + i, 2, f"{prefix} {marker} {name}", 2 if mode == "device" and i == dev_idx else 0)
+
+            top = top + max(len(device_choices), 1) + 1
+            safe_addstr(stdscr, top - 1, 2, "Container (Multi-Select):", 4 if mode == "containers" else 0)
             if not choices:
                 safe_addstr(stdscr, top, 2, "Keine Container gefunden.", 1)
             for i, name in enumerate(choices):
                 if top + i >= my - 2:
                     break
                 marker = "[x]" if name in selected else "[ ]"
-                prefix = ">" if i == idx else " "
-                safe_addstr(stdscr, top + i, 2, f"{prefix} {marker} {name}", 2 if i == idx else 0)
+                prefix = ">" if mode == "containers" and i == idx else " "
+                safe_addstr(stdscr, top + i, 2, f"{prefix} {marker} {name}", 2 if mode == "containers" and i == idx else 0)
             stdscr.refresh()
             ch = stdscr.getch()
             if ch in [27, ord("q"), ord("Q")]:
                 return
-            if ch in [curses.KEY_UP, ord("k")] and choices:
+            if ch == 9:
+                mode = "device" if mode == "containers" else "containers"
+            elif ch in [curses.KEY_UP, ord("k")] and mode == "containers" and choices:
                 idx = (idx - 1) % len(choices)
-            elif ch in [curses.KEY_DOWN, ord("j")] and choices:
+            elif ch in [curses.KEY_DOWN, ord("j")] and mode == "containers" and choices:
                 idx = (idx + 1) % len(choices)
-            elif ch == ord(" ") and choices:
+            elif ch in [curses.KEY_UP, ord("k")] and mode == "device" and device_choices:
+                dev_idx = (dev_idx - 1) % len(device_choices)
+            elif ch in [curses.KEY_DOWN, ord("j")] and mode == "device" and device_choices:
+                dev_idx = (dev_idx + 1) % len(device_choices)
+            elif ch == ord(" ") and mode == "containers" and choices:
                 name = choices[idx]
                 if name in selected:
                     selected.remove(name)
                 else:
                     selected.add(name)
-            elif ch in [ord("a"), ord("A")]:
+            elif ch == ord(" ") and mode == "device" and device_choices:
+                selected_device = device_choices[dev_idx]
+            elif ch in [ord("a"), ord("A")] and mode == "containers":
                 selected = set() if selected else set(choices)
             elif ch in [10, 13]:
                 selected_containers = sorted(selected)
                 config["containers"] = selected_containers
+                config["bcache_device"] = selected_device
                 ok, msg = save_config(config)
                 config_notice = "Config gespeichert." if ok else f"Config speichern fehlgeschlagen: {msg}"
+                refresh_device_selection()
                 return
 
     while True:
         stdscr.erase()
         maxy,maxx=stdscr.getmaxyx()
 
-        if not BCACHE:
+        refresh_device_selection()
+        if not device_path:
             safe_addstr(stdscr, 0, 0, "No bcache device found (set BCACHE_MONITOR_DEVICE)", 1)
-            if BCACHE_DEVICES:
-                safe_addstr(stdscr, 1, 0, f"Available: {', '.join(BCACHE_DEVICES)}", 3)
+            if available_devices:
+                safe_addstr(stdscr, 1, 0, f"Available: {', '.join(available_devices)}", 3)
             safe_addstr(stdscr, 2, 0, "Q=quit")
             stdscr.refresh()
             if stdscr.getch() in [ord('q'),ord('Q')]:
@@ -648,13 +692,13 @@ def draw(stdscr):
         dirty_display=format_dirty_value(dirty_bytes)
 
         # -------- HEADER --------
-        safe_addstr(stdscr,0,2,f"BCACHE OBSERVABILITY v{__version__} | DEVICE {device_name or ACTIVE_DEVICE}",4)
+        safe_addstr(stdscr,0,2,f"BCACHE OBSERVABILITY v{__version__} | DEVICE {device_name or 'N/A'}",4)
 
         # -------- TOP BAR --------
         ratio = (mps / hps) if hps > 0 else (float("inf") if mps > 0 else 0.0)
         ratio_text = "∞" if ratio == float("inf") else f"{ratio:.2f}"
         safe_addstr(stdscr,2,2,f"EFF {eff:.1f}%   DIRTY {dirty_display}   MISS/HIT {ratio_text}")
-        safe_addstr(stdscr,3,2,f"LIVE: HIT/s {hps}   MISS/s {mps}   DEVICE {device_name or ACTIVE_DEVICE}")
+        safe_addstr(stdscr,3,2,f"LIVE: HIT/s {hps}   MISS/s {mps}   DEVICE {device_name or 'N/A'} ({device_source})")
 
         # -------- GRAPH --------
         graph_h = max(8, maxy//3)
@@ -747,6 +791,8 @@ def draw(stdscr):
             safe_addstr(stdscr,maxy-2,2,update_notice,3)
         if config_notice:
             safe_addstr(stdscr,maxy-2,2,config_notice,3)
+        elif device_warning:
+            safe_addstr(stdscr,maxy-2,2,device_warning,3)
         safe_addstr(stdscr,maxy-1,2,"Q=quit  S=settings")
 
         stdscr.refresh()
