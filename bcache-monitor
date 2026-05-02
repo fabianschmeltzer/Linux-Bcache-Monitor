@@ -3,7 +3,7 @@ import curses, time, subprocess, os, sys, urllib.request, glob, json
 from dataclasses import dataclass, field
 from collections import deque
 
-__version__ = "0.3.6"
+__version__ = "0.3.8"
 
 # URLs can be overridden for your publish target, e.g. GitHub raw links.
 VERSION_URL = os.environ.get("BCACHE_MONITOR_VERSION_URL", "https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monitor/main/VERSION")
@@ -347,32 +347,60 @@ def list_running_containers():
     return names, result["status"]
 
 
-def list_container_stats(selected_containers):
-    result = _run_command(
-        ["docker", "stats", "--no-stream", "--format", "{{.Name}}|{{.CPUPerc}}|{{.MemPerc}}"],
-        timeout=2.0
-    )
-    if not result["ok"]:
-        return [], result["status"]
+def _normalize_container_name(name):
+    return str(name or "").strip().lstrip("/")
 
-    res = []
-    for line in result["stdout"].splitlines():
+
+def _parse_stats_output(stdout, selected=None):
+    entries = []
+    for line in stdout.splitlines():
         parts = line.split("|")
         if len(parts) != 3:
             continue
         name, cpu_raw, mem_raw = parts
-        if selected_containers and name not in selected_containers:
+        normalized = _normalize_container_name(name)
+        if selected and normalized not in selected:
             continue
 
         cpu = _parse_percent(cpu_raw)
         mem = _parse_percent(mem_raw)
         if cpu is None or mem is None:
             continue
-        res.append((name, cpu, mem))
+        entries.append((normalized or name, cpu, mem))
+    return entries
+
+
+def list_container_stats(selected_containers):
+    selected = {_normalize_container_name(name) for name in (selected_containers or []) if _normalize_container_name(name)}
+    format_args = ["--no-stream", "--format", "{{.Name}}|{{.CPUPerc}}|{{.MemPerc}}"]
+
+    if not selected:
+        result = _run_command(["docker", "stats", *format_args], timeout=2.5)
+        if not result["ok"]:
+            return [], result["status"]
+        res = _parse_stats_output(result["stdout"])
+        if res:
+            return res, "OK"
+        return [], "ALL (none running)"
+
+    res = []
+    failures = []
+    for container in sorted(selected):
+        result = _run_command(["docker", "stats", *format_args, container], timeout=2.5)
+        if not result["ok"]:
+            failures.append(result["status"])
+            continue
+        res.extend(_parse_stats_output(result["stdout"], selected={container}))
 
     if res:
-        return res, "OK"
-    return [], ("NO CONTAINERS" if selected_containers else "ALL (none running)")
+        status = "OK"
+        if failures:
+            status = f"PARTIAL ({failures[0]})"
+        return res, status
+
+    if failures:
+        return [], failures[0]
+    return [], "NO CONTAINERS"
 
 def stats():
     for r,d,_ in os.walk("/sys/fs/bcache"):
