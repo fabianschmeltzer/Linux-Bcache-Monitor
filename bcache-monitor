@@ -575,29 +575,47 @@ def draw(stdscr):
         while True:
             stdscr.erase()
             my, mx = stdscr.getmaxyx()
-            safe_addstr(stdscr, 0, 2, "SETTINGS: Container + Device Auswahl", 4)
-            safe_addstr(stdscr, 1, 2, "Tab=Bereich  Space=toggle  Enter=speichern  A=alle/keine  Esc=zurück")
-            safe_addstr(stdscr, 2, 2, f"docker ps: {state}", 4)
-            safe_addstr(stdscr, 3, 2, "Leere Auswahl = ALLE Container anzeigen", 3)
-            safe_addstr(stdscr, 4, 2, "Device (Single-Select):", 4 if mode == "device" else 0)
-            top = 5
+            box_w = max(44, min(mx - 4, 96))
+            box_h = max(16, min(my - 4, my - 2))
+            box_x = max(1, (mx - box_w) // 2)
+            box_y = max(1, (my - box_h) // 2)
+            stdscr.attron(curses.color_pair(4))
+            stdscr.border()
+            stdscr.attroff(curses.color_pair(4))
+            for x in range(box_x, box_x + box_w):
+                safe_addstr(stdscr, box_y, x, "─", 4)
+                safe_addstr(stdscr, box_y + box_h - 1, x, "─", 4)
+            for y in range(box_y, box_y + box_h):
+                safe_addstr(stdscr, y, box_x, "│", 4)
+                safe_addstr(stdscr, y, box_x + box_w - 1, "│", 4)
+            safe_addstr(stdscr, box_y, box_x, "┌", 4)
+            safe_addstr(stdscr, box_y, box_x + box_w - 1, "┐", 4)
+            safe_addstr(stdscr, box_y + box_h - 1, box_x, "└", 4)
+            safe_addstr(stdscr, box_y + box_h - 1, box_x + box_w - 1, "┘", 4)
+
+            safe_addstr(stdscr, box_y + 1, box_x + 2, "SETTINGS", 4)
+            safe_addstr(stdscr, box_y + 2, box_x + 2, "↑↓ Navigation | Tab Bereich | Space Auswahl | Enter Speichern | Esc Zurück", 3)
+            safe_addstr(stdscr, box_y + 3, box_x + 2, f"docker ps: {state}", 4)
+            safe_addstr(stdscr, box_y + 4, box_x + 2, "Leere Auswahl = ALLE Container anzeigen", 3)
+            safe_addstr(stdscr, box_y + 5, box_x + 2, "Device (Single-Select):", 4 if mode == "device" else 0)
+            top = box_y + 6
             if not device_choices:
-                safe_addstr(stdscr, top, 2, "Keine bcache-Devices gefunden.", 1)
+                safe_addstr(stdscr, top, box_x + 2, "Keine bcache-Devices gefunden.", 1)
             for i, name in enumerate(device_choices):
                 marker = "(*)" if name == selected_device else "( )"
                 prefix = ">" if mode == "device" and i == dev_idx else " "
-                safe_addstr(stdscr, top + i, 2, f"{prefix} {marker} {name}", 2 if mode == "device" and i == dev_idx else 0)
+                safe_addstr(stdscr, top + i, box_x + 2, f"{prefix} {marker} {name}", 2 if mode == "device" and i == dev_idx else 0)
 
             top = top + max(len(device_choices), 1) + 1
-            safe_addstr(stdscr, top - 1, 2, "Container (Multi-Select):", 4 if mode == "containers" else 0)
+            safe_addstr(stdscr, top - 1, box_x + 2, "Container (Multi-Select):", 4 if mode == "containers" else 0)
             if not choices:
-                safe_addstr(stdscr, top, 2, "Keine Container gefunden.", 1)
+                safe_addstr(stdscr, top, box_x + 2, "Keine Container gefunden.", 1)
             for i, name in enumerate(choices):
-                if top + i >= my - 2:
+                if top + i >= box_y + box_h - 2:
                     break
                 marker = "[x]" if name in selected else "[ ]"
                 prefix = ">" if mode == "containers" and i == idx else " "
-                safe_addstr(stdscr, top + i, 2, f"{prefix} {marker} {name}", 2 if mode == "containers" and i == idx else 0)
+                safe_addstr(stdscr, top + i, box_x + 2, f"{prefix} {marker} {name}", 2 if mode == "containers" and i == idx else 0)
             stdscr.refresh()
             ch = stdscr.getch()
             if ch in [27, ord("q"), ord("Q")]:
@@ -647,16 +665,7 @@ def draw(stdscr):
             time.sleep(1)
             continue
 
-        if maxy < 12 or maxx < 48:
-            safe_addstr(stdscr, 0, 0, "BCACHE OBS")
-            safe_addstr(stdscr, 1, 0, "Terminal too small")
-            safe_addstr(stdscr, 2, 0, f"H:{hps if 'hps' in locals() else 0} M:{mps if 'mps' in locals() else 0}")
-            safe_addstr(stdscr, 3, 0, "Q=quit")
-            stdscr.refresh()
-            if stdscr.getch() in [ord('q'),ord('Q')]:
-                break
-            time.sleep(1)
-            continue
+        compact_mode = maxy < 26 or maxx < 100
 
         # DATA
         if not device_path:
@@ -692,16 +701,16 @@ def draw(stdscr):
         dirty_display=format_dirty_value(dirty_bytes)
 
         # -------- HEADER --------
-        safe_addstr(stdscr,0,2,f"BCACHE OBSERVABILITY v{__version__} | DEVICE {device_name or 'N/A'}",4)
+        safe_addstr(stdscr,0,2,f"HEADER | BCACHE OBSERVABILITY v{__version__} | DEVICE {device_name or 'N/A'}",4)
 
-        # -------- TOP BAR --------
+        # -------- KPI BLOCK --------
         ratio = (mps / hps) if hps > 0 else (float("inf") if mps > 0 else 0.0)
         ratio_text = "∞" if ratio == float("inf") else f"{ratio:.2f}"
-        safe_addstr(stdscr,2,2,f"EFF {eff:.1f}%   DIRTY {dirty_display}   MISS/HIT {ratio_text}")
-        safe_addstr(stdscr,3,2,f"LIVE: HIT/s {hps}   MISS/s {mps}   DEVICE {device_name or 'N/A'} ({device_source})")
+        safe_addstr(stdscr,2,2,f"KPI   | EFF {eff:.1f}%   DIRTY {dirty_display}   MISS/HIT {ratio_text}")
+        safe_addstr(stdscr,3,2,f"KPI   | LIVE HIT/s {hps}   MISS/s {mps}   SRC {device_source}")
 
         # -------- GRAPH --------
-        graph_h = max(8, maxy//3)
+        graph_h = 5 if compact_mode else max(8, maxy//3)
         graph_w = max(20, maxx-14)
         graph_y = 5
         graph_x = 10
@@ -714,7 +723,7 @@ def draw(stdscr):
         draw_line_graph(stdscr, miss, graph_y, graph_x, graph_w, graph_h, 1, maxv)
         draw_line_graph(stdscr, hits, graph_y, graph_x, graph_w, graph_h, 2, maxv)
         safe_addstr(stdscr, graph_y + graph_h, graph_x, "└" + ("─" * (graph_w - 1)), 4)
-        safe_addstr(stdscr, graph_y - 1, graph_x, "M=red MISS/s | H=green HIT/s", 4)
+        safe_addstr(stdscr, graph_y - 1, graph_x, "GRAPH | M=red MISS/s | H=green HIT/s", 4)
         safe_addstr(stdscr, graph_y - 1, graph_x + 34, f"Scale {maxv}/s", 4)
 
         avg_h = (sum(hits) / len(hits)) if hits else 0
@@ -727,14 +736,10 @@ def draw(stdscr):
 
         # -------- STATUS --------
         status,color,reason=status_from_metrics(eff,hps,mps,miss_trend)
-        safe_addstr(stdscr,4+graph_h+1,2,f"STATUS: {status} ({reason})",color)
+        safe_addstr(stdscr,4+graph_h+1,2,f"HEALTH | PRIMARY ALERT: {status} ({reason})",color)
         eff_arrow = trend_arrow(eff, avg_h and (h0/(h0+m0)*100 if (h0+m0) else eff))
-        ratio_arrow = trend_arrow(mps, short_m if 'short_m' in locals() else avg_m)
-        safe_addstr(
-            stdscr,4+graph_h+2,2,
-            f"HEALTH: {status} | EFF {eff:.1f}%{eff_arrow} (crit<{EFF_CRITICAL_THRESHOLD:.0f}) | MISS/HIT {ratio_text}{ratio_arrow} (crit≥{MISS_HIT_RATIO_CRITICAL:.2f})",
-            color
-        )
+        ratio_arrow = trend_arrow(mps, avg_m)
+        safe_addstr(stdscr,4+graph_h+2,2,f"HEALTH | EFF {eff:.1f}%{eff_arrow} (crit<{EFF_CRITICAL_THRESHOLD:.0f}) | MISS/HIT {ratio_text}{ratio_arrow} (crit≥{MISS_HIT_RATIO_CRITICAL:.2f})", color)
         if len(hits) >= 10 and len(miss) >= 10:
             short_h = sum(list(hits)[-10:]) / 10
             short_m = sum(list(miss)[-10:]) / 10
@@ -743,9 +748,30 @@ def draw(stdscr):
             short_m = avg_m
         safe_addstr(stdscr,graph_y+graph_h+3,2,f"10s AVG -> H:{short_h:.0f}/s  M:{short_m:.0f}/s  ΔMISS:{pct_change(short_m, avg_m):+.0f}% vs window",4)
 
+        if compact_mode:
+            safe_addstr(stdscr, graph_y + graph_h + 5, 2, "COMPACT MODE | Kernmetriken aktiv", 3)
+            if update_notice:
+                safe_addstr(stdscr,maxy-2,2,update_notice,3)
+            if config_notice:
+                safe_addstr(stdscr,maxy-2,2,config_notice,3)
+            elif device_warning:
+                safe_addstr(stdscr,maxy-2,2,device_warning,3)
+            safe_addstr(stdscr,maxy-1,2,"FOOTER/HOTKEYS | Q quit | S settings | R reload",4)
+            stdscr.refresh()
+            key = stdscr.getch()
+            if key in [ord('q'),ord('Q')]:
+                break
+            if key in [ord('s'),ord('S')]:
+                open_settings()
+                docker_last = 0.0
+            if key in [ord('r'),ord('R')]:
+                docker_last = 0.0
+            time.sleep(1)
+            continue
+
         # -------- CONTAINERS --------
         y = graph_y+graph_h+5
-        safe_addstr(stdscr,y,2,"CACHE NUMBERS",4)
+        safe_addstr(stdscr,y,2,"CONTAINERS | CACHE NUMBERS",4)
         y += 1
         safe_addstr(stdscr,y,2,f"Total Hits:   {h0:,}")
         safe_addstr(stdscr,y,32,f"Total Misses: {m0:,}")
@@ -768,22 +794,27 @@ def draw(stdscr):
         y += 1
         safe_addstr(stdscr,y,32,f"DATA: SYSFS {'OK' if sysfs_ok else 'MISSING'} | DOCKER {docker_state}", 4)
         y += 1
+        table_start_x = 2
+        name_col_w = max(12, int(maxx * 0.35))
+        cpu_col_w = max(18, int(maxx * 0.30))
+        mem_col_w = max(18, int(maxx * 0.30))
+        cpu_x = table_start_x + name_col_w
+        mem_x = cpu_x + cpu_col_w
+        safe_addstr(stdscr, y, table_start_x, f"{'NAME':<{name_col_w-1}}{'CPU':>{cpu_col_w}}{'RAM':>{mem_col_w}}", 4)
+        y += 1
         for name,cpu,mem in docker_cache:
             if y+1 >= maxy:
                 break
-
-            cpu_col = max(24, maxx // 3)
-            mem_col = max(cpu_col + 20, (maxx * 2) // 3)
-            cpu_room = max(0, mem_col - cpu_col - 10)
-            mem_room = max(0, maxx - mem_col - 12)
+            cpu_room = max(0, cpu_col_w - 10)
+            mem_room = max(0, mem_col_w - 10)
             bar_cpu = "█" * (int((max(0.0, min(cpu, 100.0)) / 100) * cpu_room) if cpu_room else 0)
             bar_mem = "█" * (int((max(0.0, min(mem, 100.0)) / 100) * mem_room) if mem_room else 0)
 
-            max_name_len = max(6, cpu_col - 4)
+            max_name_len = max(6, name_col_w - 2)
             disp_name = name if len(name) <= max_name_len else name[:max_name_len-1] + "…"
-            safe_addstr(stdscr,y,2,disp_name)
-            safe_addstr(stdscr,y,cpu_col,f"C {cpu:4.1f}% {bar_cpu}",2)
-            safe_addstr(stdscr,y,mem_col,f"R {mem:4.1f}% {bar_mem}",3)
+            safe_addstr(stdscr,y,table_start_x,f"{disp_name:<{name_col_w-1}}")
+            safe_addstr(stdscr,y,cpu_x,f"C {cpu:5.1f}% {bar_cpu:<{cpu_room}}",2)
+            safe_addstr(stdscr,y,mem_x,f"R {mem:5.1f}% {bar_mem:<{mem_room}}",3)
 
             y+=1
 
@@ -793,7 +824,7 @@ def draw(stdscr):
             safe_addstr(stdscr,maxy-2,2,config_notice,3)
         elif device_warning:
             safe_addstr(stdscr,maxy-2,2,device_warning,3)
-        safe_addstr(stdscr,maxy-1,2,"Q=quit  S=settings")
+        safe_addstr(stdscr,maxy-1,2,"FOOTER/HOTKEYS | Q quit | S settings | R reload",4)
 
         stdscr.refresh()
 
@@ -802,6 +833,8 @@ def draw(stdscr):
             break
         if key in [ord('s'),ord('S')]:
             open_settings()
+            docker_last = 0.0
+        if key in [ord('r'),ord('R')]:
             docker_last = 0.0
 
         time.sleep(1)
