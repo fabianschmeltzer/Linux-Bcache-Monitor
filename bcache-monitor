@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import curses, time, subprocess, os, sys, urllib.request, glob, json
+from dataclasses import dataclass, field
 from collections import deque
 
 __version__ = "0.3.5"
@@ -205,7 +206,7 @@ def dirty_val():
         return None
     return parse_sysfs_size_bytes(read(f"{BCACHE}/dirty_data"))
 
-def discover_bcache_devices():
+def list_bcache_devices():
     candidates = []
     for path in sorted(glob.glob("/sys/block/*/bcache")):
         if os.path.isdir(path):
@@ -216,7 +217,7 @@ def discover_bcache_devices():
 
 
 def resolve_bcache_device(config_device=""):
-    candidates = discover_bcache_devices()
+    candidates = list_bcache_devices()
     devices = [device for device, _ in candidates]
     device_map = {device: path for device, path in candidates}
 
@@ -326,20 +327,52 @@ def save_config(config):
             pass
 
 
-def list_running_containers():
+def _run_command(command, timeout=2.0):
     try:
-        cp = subprocess.run(
-            ["docker", "ps", "--format", "{{.Names}}"],
-            capture_output=True, text=True, timeout=2.0, check=False
-        )
+        cp = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
         if cp.returncode != 0:
-            return [], f"ERR:{cp.returncode}"
-        names = [line.strip() for line in cp.stdout.splitlines() if line.strip()]
-        return names, "OK"
+            return {"ok": False, "status": f"ERR:{cp.returncode}", "stdout": cp.stdout, "stderr": cp.stderr}
+        return {"ok": True, "status": "OK", "stdout": cp.stdout, "stderr": cp.stderr}
     except subprocess.TimeoutExpired:
-        return [], "TIMEOUT"
+        return {"ok": False, "status": "TIMEOUT", "stdout": "", "stderr": ""}
     except FileNotFoundError:
-        return [], "NOT INSTALLED"
+        return {"ok": False, "status": "NOT INSTALLED", "stdout": "", "stderr": ""}
+
+
+def list_running_containers():
+    result = _run_command(["docker", "ps", "--format", "{{.Names}}"], timeout=2.0)
+    if not result["ok"]:
+        return [], result["status"]
+    names = [line.strip() for line in result["stdout"].splitlines() if line.strip()]
+    return names, result["status"]
+
+
+def list_container_stats(selected_containers):
+    result = _run_command(
+        ["docker", "stats", "--no-stream", "--format", "{{.Name}}|{{.CPUPerc}}|{{.MemPerc}}"],
+        timeout=2.0
+    )
+    if not result["ok"]:
+        return [], result["status"]
+
+    res = []
+    for line in result["stdout"].splitlines():
+        parts = line.split("|")
+        if len(parts) != 3:
+            continue
+        name, cpu_raw, mem_raw = parts
+        if selected_containers and name not in selected_containers:
+            continue
+
+        cpu = _parse_percent(cpu_raw)
+        mem = _parse_percent(mem_raw)
+        if cpu is None or mem is None:
+            continue
+        res.append((name, cpu, mem))
+
+    if res:
+        return res, "OK"
+    return [], ("NO CONTAINERS" if selected_containers else "ALL (none running)")
 
 def stats():
     for r,d,_ in os.walk("/sys/fs/bcache"):
@@ -364,39 +397,49 @@ def _parse_percent(raw):
         return None
 
 
-def docker(selected_containers):
-    try:
-        cp = subprocess.run(
-            ["docker", "stats", "--no-stream", "--format", "{{.Name}}|{{.CPUPerc}}|{{.MemPerc}}"],
-            capture_output=True, text=True, timeout=2.0, check=False
-        )
-        if cp.returncode != 0:
-            return [], f"ERR:{cp.returncode}"
+@dataclass
+class AppState:
+    config: dict
+    config_notice: str = ""
+    update_notice: str = ""
+    selected_containers: list = field(default_factory=list)
+    docker_cache: list = field(default_factory=list)
+    docker_state: str = "UNAVAILABLE"
+    docker_last: float = 0.0
+    available_devices: list = field(default_factory=list)
+    device_name: str = ""
+    device_path: str = ""
+    device_source: str = "none"
+    device_warning: str = ""
+    hits: deque = field(default_factory=lambda: deque(maxlen=HISTORY))
+    miss: deque = field(default_factory=lambda: deque(maxlen=HISTORY))
+    miss_trend: deque = field(default_factory=lambda: deque(maxlen=TREND_WINDOW))
+    ph: int = 0
+    pm: int = 0
+    pt: float = 0.0
+    graph_scale: float = 1.0
 
-        res = []
-        for line in cp.stdout.splitlines():
-            parts = line.split("|")
-            if len(parts) != 3:
-                continue
-            name, cpu_raw, mem_raw = parts
-            if selected_containers and name not in selected_containers:
-                continue
 
-            cpu = _parse_percent(cpu_raw)
-            mem = _parse_percent(mem_raw)
-            if cpu is None or mem is None:
-                continue
-            res.append((name, cpu, mem))
+def refresh_device_selection(state):
+    resolution = resolve_bcache_device(state.config.get("bcache_device", ""))
+    state.device_name = resolution["device"]
+    state.device_path = resolution["path"]
+    state.device_source = resolution["source"]
+    state.available_devices = resolution["devices"]
+    state.device_warning = resolution["warning"]
+    global BCACHE
+    BCACHE = state.device_path
 
-        if res:
-            return res, "OK"
 
-        # docker reachable, but none of the monitored containers currently running
-        return [], ("NO CONTAINERS" if selected_containers else "ALL (none running)")
-    except subprocess.TimeoutExpired:
-        return [], "TIMEOUT"
-    except FileNotFoundError:
-        return [], "NOT INSTALLED"
+def handle_keypress(key, state):
+    if key in [ord('q'), ord('Q')]:
+        return "quit"
+    if key in [ord('s'), ord('S')]:
+        return "settings"
+    if key in [ord('r'), ord('R')]:
+        state.docker_last = 0.0
+        return "reload"
+    return "none"
 
 # ---------- GRAPH (AREA STYLE) ----------
 
@@ -518,7 +561,69 @@ def trend_arrow(current, baseline):
 
 # ---------- MAIN ----------
 
-def draw(stdscr):
+def draw_settings(stdscr, state):
+    running, ps_state = list_running_containers()
+    choices = sorted(set(running) | set(state.selected_containers))
+    selected = set(state.selected_containers)
+    device_choices = list(state.available_devices)
+    selected_device = state.config.get("bcache_device", "").strip()
+    idx = 0
+    dev_idx = device_choices.index(selected_device) if selected_device in device_choices else 0
+    mode = "containers"
+    while True:
+        stdscr.erase()
+        my, mx = stdscr.getmaxyx()
+        box_w = max(44, min(mx - 4, 96))
+        box_h = max(16, min(my - 4, my - 2))
+        box_x = max(1, (mx - box_w) // 2)
+        box_y = max(1, (my - box_h) // 2)
+        stdscr.attron(curses.color_pair(4)); stdscr.border(); stdscr.attroff(curses.color_pair(4))
+        for x in range(box_x, box_x + box_w):
+            safe_addstr(stdscr, box_y, x, "─", 4); safe_addstr(stdscr, box_y + box_h - 1, x, "─", 4)
+        for y in range(box_y, box_y + box_h):
+            safe_addstr(stdscr, y, box_x, "│", 4); safe_addstr(stdscr, y, box_x + box_w - 1, "│", 4)
+        safe_addstr(stdscr, box_y, box_x, "┌", 4); safe_addstr(stdscr, box_y, box_x + box_w - 1, "┐", 4)
+        safe_addstr(stdscr, box_y + box_h - 1, box_x, "└", 4); safe_addstr(stdscr, box_y + box_h - 1, box_x + box_w - 1, "┘", 4)
+        safe_addstr(stdscr, box_y + 1, box_x + 2, "SETTINGS", 4)
+        safe_addstr(stdscr, box_y + 2, box_x + 2, "↑↓ Navigation | Tab Bereich | Space Auswahl | Enter Speichern | Esc Zurück", 3)
+        safe_addstr(stdscr, box_y + 3, box_x + 2, f"docker ps: {ps_state}", 4)
+        safe_addstr(stdscr, box_y + 4, box_x + 2, "Leere Auswahl = ALLE Container anzeigen", 3)
+        safe_addstr(stdscr, box_y + 5, box_x + 2, "Device (Single-Select):", 4 if mode == "device" else 0)
+        top = box_y + 6
+        if not device_choices: safe_addstr(stdscr, top, box_x + 2, "Keine bcache-Devices gefunden.", 1)
+        for i, name in enumerate(device_choices):
+            marker = "(*)" if name == selected_device else "( )"; prefix = ">" if mode == "device" and i == dev_idx else " "
+            safe_addstr(stdscr, top + i, box_x + 2, f"{prefix} {marker} {name}", 2 if mode == "device" and i == dev_idx else 0)
+        top = top + max(len(device_choices), 1) + 1
+        safe_addstr(stdscr, top - 1, box_x + 2, "Container (Multi-Select):", 4 if mode == "containers" else 0)
+        if not choices: safe_addstr(stdscr, top, box_x + 2, "Keine Container gefunden.", 1)
+        for i, name in enumerate(choices):
+            if top + i >= box_y + box_h - 2: break
+            marker = "[x]" if name in selected else "[ ]"; prefix = ">" if mode == "containers" and i == idx else " "
+            safe_addstr(stdscr, top + i, box_x + 2, f"{prefix} {marker} {name}", 2 if mode == "containers" and i == idx else 0)
+        stdscr.refresh()
+        ch = stdscr.getch()
+        if ch in [27, ord("q"), ord("Q")]: return
+        if ch == 9: mode = "device" if mode == "containers" else "containers"
+        elif ch in [curses.KEY_UP, ord("k")] and mode == "containers" and choices: idx = (idx - 1) % len(choices)
+        elif ch in [curses.KEY_DOWN, ord("j")] and mode == "containers" and choices: idx = (idx + 1) % len(choices)
+        elif ch in [curses.KEY_UP, ord("k")] and mode == "device" and device_choices: dev_idx = (dev_idx - 1) % len(device_choices)
+        elif ch in [curses.KEY_DOWN, ord("j")] and mode == "device" and device_choices: dev_idx = (dev_idx + 1) % len(device_choices)
+        elif ch == ord(" ") and mode == "containers" and choices:
+            name = choices[idx]; selected.remove(name) if name in selected else selected.add(name)
+        elif ch == ord(" ") and mode == "device" and device_choices: selected_device = device_choices[dev_idx]
+        elif ch in [ord("a"), ord("A")] and mode == "containers": selected = set() if selected else set(choices)
+        elif ch in [10, 13]:
+            state.selected_containers = sorted(selected)
+            state.config["containers"] = state.selected_containers
+            state.config["bcache_device"] = selected_device
+            ok, msg = save_config(state.config)
+            state.config_notice = "Config gespeichert." if ok else f"Config speichern fehlgeschlagen: {msg}"
+            refresh_device_selection(state)
+            return
+
+
+def draw_main(stdscr):
     curses.curs_set(0)
     stdscr.nodelay(True)
 
@@ -528,136 +633,22 @@ def draw(stdscr):
     if updated_from and updated_to:
         update_notice = f"UPDATED: {updated_from} -> {updated_to}"
 
-    hits=deque(maxlen=HISTORY)
-    miss=deque(maxlen=HISTORY)
-    miss_trend=deque(maxlen=TREND_WINDOW)
-
     ph,pm=stats()
     if ph is None or pm is None:
         ph, pm = 0, 0
-    pt=time.time()
-    docker_cache = []
-    docker_state = "UNAVAILABLE"
-    docker_last = 0.0
-    graph_scale = 1.0
     config, config_notice = load_config()
-    selected_containers = list(config.get("containers", []))
-    resolution = resolve_bcache_device(config.get("bcache_device", ""))
-    device_name = resolution["device"]
-    device_path = resolution["path"]
-    device_source = resolution["source"]
-    available_devices = resolution["devices"]
-    device_warning = resolution["warning"]
-    global BCACHE
-    BCACHE = device_path
-
-    def refresh_device_selection():
-        nonlocal resolution, device_name, device_path, device_source, available_devices, device_warning
-        global BCACHE
-        resolution = resolve_bcache_device(config.get("bcache_device", ""))
-        device_name = resolution["device"]
-        device_path = resolution["path"]
-        device_source = resolution["source"]
-        available_devices = resolution["devices"]
-        device_warning = resolution["warning"]
-        BCACHE = device_path
-
-    def open_settings():
-        nonlocal selected_containers, config_notice, device_name, device_source, available_devices
-        running, state = list_running_containers()
-        choices = sorted(set(running) | set(selected_containers))
-        selected = set(selected_containers)
-        device_choices = list(available_devices)
-        selected_device = config.get("bcache_device", "").strip()
-        idx = 0
-        dev_idx = device_choices.index(selected_device) if selected_device in device_choices else 0
-        mode = "containers"
-        while True:
-            stdscr.erase()
-            my, mx = stdscr.getmaxyx()
-            box_w = max(44, min(mx - 4, 96))
-            box_h = max(16, min(my - 4, my - 2))
-            box_x = max(1, (mx - box_w) // 2)
-            box_y = max(1, (my - box_h) // 2)
-            stdscr.attron(curses.color_pair(4))
-            stdscr.border()
-            stdscr.attroff(curses.color_pair(4))
-            for x in range(box_x, box_x + box_w):
-                safe_addstr(stdscr, box_y, x, "─", 4)
-                safe_addstr(stdscr, box_y + box_h - 1, x, "─", 4)
-            for y in range(box_y, box_y + box_h):
-                safe_addstr(stdscr, y, box_x, "│", 4)
-                safe_addstr(stdscr, y, box_x + box_w - 1, "│", 4)
-            safe_addstr(stdscr, box_y, box_x, "┌", 4)
-            safe_addstr(stdscr, box_y, box_x + box_w - 1, "┐", 4)
-            safe_addstr(stdscr, box_y + box_h - 1, box_x, "└", 4)
-            safe_addstr(stdscr, box_y + box_h - 1, box_x + box_w - 1, "┘", 4)
-
-            safe_addstr(stdscr, box_y + 1, box_x + 2, "SETTINGS", 4)
-            safe_addstr(stdscr, box_y + 2, box_x + 2, "↑↓ Navigation | Tab Bereich | Space Auswahl | Enter Speichern | Esc Zurück", 3)
-            safe_addstr(stdscr, box_y + 3, box_x + 2, f"docker ps: {state}", 4)
-            safe_addstr(stdscr, box_y + 4, box_x + 2, "Leere Auswahl = ALLE Container anzeigen", 3)
-            safe_addstr(stdscr, box_y + 5, box_x + 2, "Device (Single-Select):", 4 if mode == "device" else 0)
-            top = box_y + 6
-            if not device_choices:
-                safe_addstr(stdscr, top, box_x + 2, "Keine bcache-Devices gefunden.", 1)
-            for i, name in enumerate(device_choices):
-                marker = "(*)" if name == selected_device else "( )"
-                prefix = ">" if mode == "device" and i == dev_idx else " "
-                safe_addstr(stdscr, top + i, box_x + 2, f"{prefix} {marker} {name}", 2 if mode == "device" and i == dev_idx else 0)
-
-            top = top + max(len(device_choices), 1) + 1
-            safe_addstr(stdscr, top - 1, box_x + 2, "Container (Multi-Select):", 4 if mode == "containers" else 0)
-            if not choices:
-                safe_addstr(stdscr, top, box_x + 2, "Keine Container gefunden.", 1)
-            for i, name in enumerate(choices):
-                if top + i >= box_y + box_h - 2:
-                    break
-                marker = "[x]" if name in selected else "[ ]"
-                prefix = ">" if mode == "containers" and i == idx else " "
-                safe_addstr(stdscr, top + i, box_x + 2, f"{prefix} {marker} {name}", 2 if mode == "containers" and i == idx else 0)
-            stdscr.refresh()
-            ch = stdscr.getch()
-            if ch in [27, ord("q"), ord("Q")]:
-                return
-            if ch == 9:
-                mode = "device" if mode == "containers" else "containers"
-            elif ch in [curses.KEY_UP, ord("k")] and mode == "containers" and choices:
-                idx = (idx - 1) % len(choices)
-            elif ch in [curses.KEY_DOWN, ord("j")] and mode == "containers" and choices:
-                idx = (idx + 1) % len(choices)
-            elif ch in [curses.KEY_UP, ord("k")] and mode == "device" and device_choices:
-                dev_idx = (dev_idx - 1) % len(device_choices)
-            elif ch in [curses.KEY_DOWN, ord("j")] and mode == "device" and device_choices:
-                dev_idx = (dev_idx + 1) % len(device_choices)
-            elif ch == ord(" ") and mode == "containers" and choices:
-                name = choices[idx]
-                if name in selected:
-                    selected.remove(name)
-                else:
-                    selected.add(name)
-            elif ch == ord(" ") and mode == "device" and device_choices:
-                selected_device = device_choices[dev_idx]
-            elif ch in [ord("a"), ord("A")] and mode == "containers":
-                selected = set() if selected else set(choices)
-            elif ch in [10, 13]:
-                selected_containers = sorted(selected)
-                config["containers"] = selected_containers
-                config["bcache_device"] = selected_device
-                ok, msg = save_config(config)
-                config_notice = "Config gespeichert." if ok else f"Config speichern fehlgeschlagen: {msg}"
-                refresh_device_selection()
-                return
+    state = AppState(config=config, config_notice=config_notice, update_notice=update_notice, selected_containers=list(config.get("containers", [])), ph=ph, pm=pm, pt=time.time())
+    refresh_device_selection(state)
 
     while True:
         stdscr.erase()
         maxy,maxx=stdscr.getmaxyx()
 
-        refresh_device_selection()
-        if not device_path:
+        refresh_device_selection(state)
+        if not state.device_path:
             safe_addstr(stdscr, 0, 0, "No bcache device found (set BCACHE_MONITOR_DEVICE)", 1)
-            if available_devices:
-                safe_addstr(stdscr, 1, 0, f"Available: {', '.join(available_devices)}", 3)
+            if state.available_devices:
+                safe_addstr(stdscr, 1, 0, f"Available: {', '.join(state.available_devices)}", 3)
             safe_addstr(stdscr, 2, 0, "Q=quit")
             stdscr.refresh()
             if stdscr.getch() in [ord('q'),ord('Q')]:
@@ -668,7 +659,7 @@ def draw(stdscr):
         compact_mode = maxy < 26 or maxx < 100
 
         # DATA
-        if not device_path:
+        if not state.device_path:
             safe_addstr(stdscr,0,2,f"BCACHE OBSERVABILITY v{__version__}",4)
             safe_addstr(stdscr,2,2,"ERROR: Kein bcache-Gerät verfügbar.",1)
             safe_addstr(stdscr,3,2,"Erwartet wird ein Pfad wie /sys/block/<device>/bcache.",3)
@@ -683,66 +674,61 @@ def draw(stdscr):
         h0,m0=stats()
         sysfs_ok = not (h0 is None or m0 is None)
         if not sysfs_ok:
-            h0, m0 = ph, pm
+            h0, m0 = state.ph, state.pm
         now=time.time()
-        dt=max(now-pt,0.5)
+        dt=max(now-state.pt,0.5)
 
-        hps=int((h0-ph)/dt)
-        mps=int((m0-pm)/dt)
-
-        ph,pm,pt=h0,m0,now
-
-        hits.append(hps)
-        miss.append(mps)
-        miss_trend.append(mps)
+        hps=int((h0-state.ph)/dt); mps=int((m0-state.pm)/dt)
+        state.ph,state.pm,state.pt=h0,m0,now
+        state.hits.append(hps); state.miss.append(mps); state.miss_trend.append(mps)
 
         eff=h0/(h0+m0)*100 if (h0+m0) else 0
         dirty_bytes=dirty_val()
         dirty_display=format_dirty_value(dirty_bytes)
 
         # -------- HEADER --------
-        safe_addstr(stdscr,0,2,f"HEADER | BCACHE OBSERVABILITY v{__version__} | DEVICE {device_name or 'N/A'}",4)
+        safe_addstr(stdscr,0,2,f"HEADER | BCACHE OBSERVABILITY v{__version__} | DEVICE {state.device_name or 'N/A'}",4)
 
         # -------- KPI BLOCK --------
         ratio = (mps / hps) if hps > 0 else (float("inf") if mps > 0 else 0.0)
         ratio_text = "∞" if ratio == float("inf") else f"{ratio:.2f}"
         safe_addstr(stdscr,2,2,f"KPI   | EFF {eff:.1f}%   DIRTY {dirty_display}   MISS/HIT {ratio_text}")
-        safe_addstr(stdscr,3,2,f"KPI   | LIVE HIT/s {hps}   MISS/s {mps}   SRC {device_source}")
+        safe_addstr(stdscr,3,2,f"KPI   | LIVE HIT/s {hps}   MISS/s {mps}   SRC {state.device_source}")
 
         # -------- GRAPH --------
         graph_h = 5 if compact_mode else max(8, maxy//3)
         graph_w = max(20, maxx-14)
         graph_y = 5
         graph_x = 10
-        raw_maxv = max(max(hits) if hits else 0, max(miss) if miss else 0, 1)
+        raw_maxv = max(max(state.hits) if state.hits else 0, max(state.miss) if state.miss else 0, 1)
         target_maxv = FIXED_MAX_PS if FIXED_MAX_PS > 0 else raw_maxv
-        graph_scale = 0.35 * target_maxv + 0.65 * graph_scale
-        maxv = max(int(graph_scale), 1)
+        state.graph_scale = 0.35 * target_maxv + 0.65 * state.graph_scale
+        maxv = max(int(state.graph_scale), 1)
 
         draw_y_markers(stdscr, graph_y, graph_x - 1, graph_h, maxv)
-        draw_line_graph(stdscr, miss, graph_y, graph_x, graph_w, graph_h, 1, maxv)
-        draw_line_graph(stdscr, hits, graph_y, graph_x, graph_w, graph_h, 2, maxv)
+        draw_line_graph(stdscr, state.miss, graph_y, graph_x, graph_w, graph_h, 1, maxv)
+        draw_line_graph(stdscr, state.hits, graph_y, graph_x, graph_w, graph_h, 2, maxv)
         safe_addstr(stdscr, graph_y + graph_h, graph_x, "└" + ("─" * (graph_w - 1)), 4)
         safe_addstr(stdscr, graph_y - 1, graph_x, "GRAPH | M=red MISS/s | H=green HIT/s", 4)
         safe_addstr(stdscr, graph_y - 1, graph_x + 34, f"Scale {maxv}/s", 4)
 
-        avg_h = (sum(hits) / len(hits)) if hits else 0
-        avg_m = (sum(miss) / len(miss)) if miss else 0
-        max_h = max(hits) if hits else 0
-        max_m = max(miss) if miss else 0
+        avg_h = (sum(state.hits) / len(state.hits)) if state.hits else 0
+        avg_m = (sum(state.miss) / len(state.miss)) if state.miss else 0
+        max_h = max(state.hits) if state.hits else 0
+        max_m = max(state.miss) if state.miss else 0
         safe_addstr(stdscr, graph_y, graph_x + 2, f"H {hps}/{avg_h:.0f}/{max_h}", 2)
         safe_addstr(stdscr, graph_y + 1, graph_x + 2, f"M {mps}/{avg_m:.0f}/{max_m}", 1)
-        safe_addstr(stdscr, graph_y + graph_h + 1, graph_x, f"window {min(len(hits), graph_w)}s (buffer {HISTORY}s)", 4)
+        safe_addstr(stdscr, graph_y + graph_h + 1, graph_x, f"window {min(len(state.hits), graph_w)}s (buffer {HISTORY}s)", 4)
 
         # -------- STATUS --------
-        status,color,reason=status_from_metrics(eff,hps,mps,miss_trend)
+        status,color,reason=status_from_metrics(eff,hps,mps,state.miss_trend)
         safe_addstr(stdscr,4+graph_h+1,2,f"HEALTH | PRIMARY ALERT: {status} ({reason})",color)
         eff_arrow = trend_arrow(eff, avg_h and (h0/(h0+m0)*100 if (h0+m0) else eff))
         ratio_arrow = trend_arrow(mps, avg_m)
         safe_addstr(stdscr,4+graph_h+2,2,f"HEALTH | EFF {eff:.1f}%{eff_arrow} (crit<{EFF_CRITICAL_THRESHOLD:.0f}) | MISS/HIT {ratio_text}{ratio_arrow} (crit≥{MISS_HIT_RATIO_CRITICAL:.2f})", color)
-        if len(hits) >= 10 and len(miss) >= 10:
-            short_h = sum(list(hits)[-10:]) / 10
-            short_m = sum(list(miss)[-10:]) / 10
+        if len(state.hits) >= 10 and len(state.miss) >= 10:
+            short_h = sum(list(state.hits)[-10:]) / 10
+            short_m = sum(list(state.miss)[-10:]) / 10
         else:
             short_h = avg_h
             short_m = avg_m
@@ -750,22 +736,14 @@ def draw(stdscr):
 
         if compact_mode:
             safe_addstr(stdscr, graph_y + graph_h + 5, 2, "COMPACT MODE | Kernmetriken aktiv", 3)
-            if update_notice:
-                safe_addstr(stdscr,maxy-2,2,update_notice,3)
-            if config_notice:
-                safe_addstr(stdscr,maxy-2,2,config_notice,3)
-            elif device_warning:
-                safe_addstr(stdscr,maxy-2,2,device_warning,3)
+            if state.update_notice: safe_addstr(stdscr,maxy-2,2,state.update_notice,3)
+            if state.config_notice: safe_addstr(stdscr,maxy-2,2,state.config_notice,3)
+            elif state.device_warning: safe_addstr(stdscr,maxy-2,2,state.device_warning,3)
             safe_addstr(stdscr,maxy-1,2,"FOOTER/HOTKEYS | Q quit | S settings | R reload",4)
             stdscr.refresh()
-            key = stdscr.getch()
-            if key in [ord('q'),ord('Q')]:
-                break
-            if key in [ord('s'),ord('S')]:
-                open_settings()
-                docker_last = 0.0
-            if key in [ord('r'),ord('R')]:
-                docker_last = 0.0
+            action = handle_keypress(stdscr.getch(), state)
+            if action == "quit": break
+            if action == "settings": draw_settings(stdscr, state)
             time.sleep(1)
             continue
 
@@ -785,14 +763,14 @@ def draw(stdscr):
         safe_addstr(stdscr,y,2,"CONTAINERS",4)
         y+=1
 
-        if now - docker_last >= DOCKER_REFRESH_SECONDS:
-            docker_cache, docker_state = docker(selected_containers)
-            docker_last = now
+        if now - state.docker_last >= DOCKER_REFRESH_SECONDS:
+            state.docker_cache, state.docker_state = list_container_stats(state.selected_containers)
+            state.docker_last = now
 
-        selection_label = f"{len(selected_containers)} selected" if selected_containers else "ALL (empty selection)"
+        selection_label = f"{len(state.selected_containers)} selected" if state.selected_containers else "ALL (empty selection)"
         safe_addstr(stdscr, y, 2, f"Containers: {selection_label}", 4)
         y += 1
-        safe_addstr(stdscr,y,32,f"DATA: SYSFS {'OK' if sysfs_ok else 'MISSING'} | DOCKER {docker_state}", 4)
+        safe_addstr(stdscr,y,32,f"DATA: SYSFS {'OK' if sysfs_ok else 'MISSING'} | DOCKER {state.docker_state}", 4)
         y += 1
         table_start_x = 2
         name_col_w = max(12, int(maxx * 0.35))
@@ -802,7 +780,7 @@ def draw(stdscr):
         mem_x = cpu_x + cpu_col_w
         safe_addstr(stdscr, y, table_start_x, f"{'NAME':<{name_col_w-1}}{'CPU':>{cpu_col_w}}{'RAM':>{mem_col_w}}", 4)
         y += 1
-        for name,cpu,mem in docker_cache:
+        for name,cpu,mem in state.docker_cache:
             if y+1 >= maxy:
                 break
             cpu_room = max(0, cpu_col_w - 10)
@@ -818,24 +796,16 @@ def draw(stdscr):
 
             y+=1
 
-        if update_notice:
-            safe_addstr(stdscr,maxy-2,2,update_notice,3)
-        if config_notice:
-            safe_addstr(stdscr,maxy-2,2,config_notice,3)
-        elif device_warning:
-            safe_addstr(stdscr,maxy-2,2,device_warning,3)
+        if state.update_notice: safe_addstr(stdscr,maxy-2,2,state.update_notice,3)
+        if state.config_notice: safe_addstr(stdscr,maxy-2,2,state.config_notice,3)
+        elif state.device_warning: safe_addstr(stdscr,maxy-2,2,state.device_warning,3)
         safe_addstr(stdscr,maxy-1,2,"FOOTER/HOTKEYS | Q quit | S settings | R reload",4)
 
         stdscr.refresh()
 
-        key = stdscr.getch()
-        if key in [ord('q'),ord('Q')]:
-            break
-        if key in [ord('s'),ord('S')]:
-            open_settings()
-            docker_last = 0.0
-        if key in [ord('r'),ord('R')]:
-            docker_last = 0.0
+        action = handle_keypress(stdscr.getch(), state)
+        if action == "quit": break
+        if action == "settings": draw_settings(stdscr, state)
 
         time.sleep(1)
 
@@ -855,7 +825,7 @@ def init(stdscr):
     curses.init_pair(2,curses.COLOR_GREEN,curses.COLOR_BLACK)
     curses.init_pair(3,curses.COLOR_YELLOW,curses.COLOR_BLACK)
     curses.init_pair(4,curses.COLOR_CYAN,curses.COLOR_BLACK)
-    draw(stdscr)
+    draw_main(stdscr)
 
 if __name__=="__main__":
     main()
