@@ -808,9 +808,52 @@ def draw_main(stdscr):
         safe_addstr(stdscr,y,32,f"DATA: SYSFS {'OK' if sysfs_ok else 'MISSING'} | DOCKER {state.docker_state}", 4)
         y += 1
         table_start_x = 2
-        name_col_w = max(12, int(maxx * 0.35))
-        cpu_col_w = max(18, int(maxx * 0.30))
-        mem_col_w = max(18, int(maxx * 0.30))
+        table_usable_w = max(1, maxx - table_start_x)
+        min_name_col_w = 8
+        min_cpu_col_w = 10
+        min_mem_col_w = 10
+        min_total_w = min_name_col_w + min_cpu_col_w + min_mem_col_w
+
+        if table_usable_w <= min_total_w:
+            # Deterministisch schrumpfen: zuerst Name, dann CPU, dann RAM.
+            name_col_w = min_name_col_w
+            cpu_col_w = min_cpu_col_w
+            mem_col_w = min_mem_col_w
+            overflow = min_total_w - table_usable_w
+
+            shrink = min(overflow, max(0, name_col_w - 1))
+            name_col_w -= shrink
+            overflow -= shrink
+            shrink = min(overflow, max(0, cpu_col_w - 1))
+            cpu_col_w -= shrink
+            overflow -= shrink
+            shrink = min(overflow, max(0, mem_col_w - 1))
+            mem_col_w -= shrink
+        else:
+            # Erst Mindestbreiten, Restbreite bevorzugt an Name verteilen.
+            rest_w = table_usable_w - min_total_w
+            name_extra = int(rest_w * 0.70)
+            cpu_extra = int(rest_w * 0.15)
+            mem_extra = int(rest_w * 0.15)
+            used_extra = name_extra + cpu_extra + mem_extra
+            name_extra += (rest_w - used_extra)
+
+            name_col_w = min_name_col_w + name_extra
+            cpu_col_w = min_cpu_col_w + cpu_extra
+            mem_col_w = min_mem_col_w + mem_extra
+
+        # Sicherheitsnetz: Summe darf nie größer als nutzbare Tabellenbreite sein.
+        total_col_w = name_col_w + cpu_col_w + mem_col_w
+        if total_col_w > table_usable_w:
+            reduce_by = total_col_w - table_usable_w
+            name_shrink = min(reduce_by, max(0, name_col_w - 1))
+            name_col_w -= name_shrink
+            reduce_by -= name_shrink
+            cpu_shrink = min(reduce_by, max(0, cpu_col_w - 1))
+            cpu_col_w -= cpu_shrink
+            reduce_by -= cpu_shrink
+            mem_col_w -= min(reduce_by, max(0, mem_col_w - 1))
+
         cpu_x = table_start_x + name_col_w
         mem_x = cpu_x + cpu_col_w
         safe_addstr(stdscr, y, table_start_x, f"{'NAME':<{name_col_w-1}}{'CPU':>{cpu_col_w}}{'RAM':>{mem_col_w}}", 4)
