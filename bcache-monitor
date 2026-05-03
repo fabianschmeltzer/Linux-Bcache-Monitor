@@ -3,7 +3,7 @@ import curses, time, subprocess, os, sys, urllib.request, glob, json, textwrap
 from dataclasses import dataclass, field
 from collections import deque
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 # URLs can be overridden for your publish target, e.g. GitHub raw links.
 VERSION_URL = os.environ.get("BCACHE_MONITOR_VERSION_URL", "https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monitor/main/VERSION")
@@ -23,10 +23,20 @@ MISS_TREND_CRITICAL=1.50
 MIN_SCRIPT_SIZE_BYTES = 1024
 MAX_SCRIPT_SIZE_BYTES = 512 * 1024
 
+def normalize_version_string(value):
+    if value is None:
+        return ""
+    token = str(value).strip()
+    if token.lower().startswith("v"):
+        token = token[1:]
+    return token
+
+
 def is_valid_version_string(value):
-    if not value:
+    token = normalize_version_string(value)
+    if not token:
         return False
-    parts = value.strip().split('.')
+    parts = token.split('.')
     if not parts:
         return False
     return all(part.isdigit() for part in parts)
@@ -65,7 +75,8 @@ def read(p):
 
 def parse_version(v):
     try:
-        return tuple(int(part) for part in v.strip().split("."))
+        token = normalize_version_string(v)
+        return tuple(int(part) for part in token.split("."))
     except:
         return (0,)
 
@@ -92,8 +103,10 @@ def print_update_event(message):
     print(f"[bcache-monitor][{ts}] {message}", flush=True)
 
 def self_update_if_needed():
-    remote_version = read_remote_text(VERSION_URL)
+    remote_version_raw = read_remote_text(VERSION_URL)
+    remote_version = normalize_version_string(remote_version_raw)
     if not is_valid_version_string(remote_version):
+        print_update_event(f"Update übersprungen: ungültige Remote-Version '{remote_version_raw}'")
         return False
 
     if parse_version(remote_version) <= parse_version(__version__):
@@ -133,7 +146,7 @@ def self_update_if_needed():
         os.environ["BCACHE_MONITOR_UPDATED_TO"] = remote_version
         print_update_event(f"Aktualisiere auf {remote_version} und starte neu...")
         time.sleep(1)
-        os.execv(script_path, [script_path] + sys.argv[1:])
+        os.execv(sys.executable, [sys.executable, script_path] + sys.argv[1:])
     except Exception as exc:
         print_update_event(f"Update fehlgeschlagen: {exc}")
     finally:
