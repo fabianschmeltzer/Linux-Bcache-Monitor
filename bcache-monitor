@@ -3,7 +3,7 @@ import curses, time, subprocess, os, sys, urllib.request, glob, json, textwrap
 from dataclasses import dataclass, field
 from collections import deque
 
-__version__ = "0.4.4"
+__version__ = "0.4.7"
 
 # URLs can be overridden for your publish target, e.g. GitHub raw links.
 VERSION_URL = os.environ.get("BCACHE_MONITOR_VERSION_URL", "https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monitor/main/VERSION")
@@ -204,6 +204,13 @@ def parse_sysfs_size_bytes(raw_value):
     return int(value * units[suffix])
 
 
+def parse_docker_mem_usage_bytes(mem_usage_raw):
+    if not mem_usage_raw:
+        return None
+    left = str(mem_usage_raw).split("/", 1)[0].strip()
+    return parse_sysfs_size_bytes(left)
+
+
 def format_dirty_value(dirty_bytes):
     if dirty_bytes is None:
         return "N/A"
@@ -370,9 +377,9 @@ def _parse_stats_output(stdout, selected=None):
     entries = []
     for line in stdout.splitlines():
         parts = line.split("|")
-        if len(parts) != 3:
+        if len(parts) != 4:
             continue
-        name, cpu_raw, mem_raw = parts
+        name, cpu_raw, mem_raw, mem_usage_raw = parts
         normalized = _normalize_container_name(name)
         if selected and normalized not in selected:
             continue
@@ -381,13 +388,13 @@ def _parse_stats_output(stdout, selected=None):
         mem = _parse_percent(mem_raw)
         if cpu is None or mem is None:
             continue
-        entries.append((normalized or name, cpu, mem))
+        entries.append((normalized or name, cpu, mem, mem_usage_raw.strip()))
     return entries
 
 
 def list_container_stats(selected_containers):
     selected = sorted({_normalize_container_name(name) for name in (selected_containers or []) if _normalize_container_name(name)})
-    format_args = ["--no-stream", "--format", "{{.Name}}|{{.CPUPerc}}|{{.MemPerc}}"]
+    format_args = ["--no-stream", "--format", "{{.Name}}|{{.CPUPerc}}|{{.MemPerc}}|{{.MemUsage}}"]
 
     command = ["docker", "stats", *format_args]
     if selected:
@@ -640,10 +647,15 @@ def draw_settings(stdscr, state):
         safe_addstr(stdscr, box_y, box_x, "┌", 4); safe_addstr(stdscr, box_y, box_x + box_w - 1, "┐", 4)
         safe_addstr(stdscr, box_y + box_h - 1, box_x, "└", 4); safe_addstr(stdscr, box_y + box_h - 1, box_x + box_w - 1, "┘", 4)
 
+        small_settings = my < 20 or mx < 70
         header_lines = ["SETTINGS"]
-        header_lines += textwrap.wrap("↑↓ Navigation | Tab Bereich | Space Auswahl | Enter Speichern | Esc Zurück", width=inner_w)[:2]
+        nav_text = "↑↓ Nav | Tab Bereich | Space Auswahl | Enter Speichern | Esc Zurück"
+        if small_settings:
+            nav_text = "↑↓ scroll | Tab wechseln | Space wählen | Enter speichern | Esc zurück"
+        header_lines += textwrap.wrap(nav_text, width=inner_w)[:2]
         header_lines += textwrap.wrap(f"docker ps: {ps_state}", width=inner_w)[:1]
-        header_lines += textwrap.wrap("Leere Auswahl = ALLE Container anzeigen", width=inner_w)[:1]
+        if not small_settings:
+            header_lines += textwrap.wrap("Leere Auswahl = ALLE Container anzeigen", width=inner_w)[:1]
 
         cur_y = box_y + 1
         for i, line in enumerate(header_lines):
@@ -658,12 +670,20 @@ def draw_settings(stdscr, state):
             cur_y += 1
 
         remaining_rows = max(0, bottom_limit - cur_y + 1)
-        device_rows = max(1, remaining_rows // 3) if remaining_rows else 0
+        if small_settings:
+            device_rows = max(1, remaining_rows - 1) if mode == "device" else 1
+            container_rows = max(1, remaining_rows - 1) if mode == "containers" else 1
+        else:
+            device_rows = max(1, remaining_rows // 3) if remaining_rows else 0
+            container_rows = max(0, remaining_rows - device_rows - 1)
+
         container_label_y = cur_y + device_rows
         if container_label_y <= bottom_limit:
-            safe_addstr(stdscr, container_label_y, inner_x, "Container (Multi-Select):"[:inner_w], 4 if mode == "containers" else 0)
+            label = "Container (Multi-Select):"
+            if small_settings and mode == "device":
+                label = "Container (Tab zum Wechseln)"
+            safe_addstr(stdscr, container_label_y, inner_x, label[:inner_w], 4 if mode == "containers" else 0)
         container_start_y = container_label_y + 1
-        container_rows = max(0, bottom_limit - container_start_y + 1)
 
         if device_choices:
             dev_idx = max(0, min(dev_idx, len(device_choices) - 1))
@@ -684,6 +704,10 @@ def draw_settings(stdscr, state):
         elif cur_y <= bottom_limit:
             safe_addstr(stdscr, cur_y, inner_x, "Keine bcache-Devices gefunden."[:inner_w], 1)
 
+        if small_settings and mode == "device" and device_choices:
+            hint = f"{dev_idx+1}/{len(device_choices)}"
+            safe_addstr(stdscr, bottom_limit, inner_x, hint[:inner_w], 4)
+
         if choices and container_rows > 0:
             idx = max(0, min(idx, len(choices) - 1))
             container_scroll = min(container_scroll, max(0, len(choices) - container_rows))
@@ -702,6 +726,10 @@ def draw_settings(stdscr, state):
                 safe_addstr(stdscr, y, inner_x, f"{prefix} {marker} {name}"[:inner_w], 2 if mode == "containers" and abs_i == idx else 0)
         elif container_start_y <= bottom_limit:
             safe_addstr(stdscr, container_start_y, inner_x, "Keine Container gefunden."[:inner_w], 1)
+
+        if small_settings and mode == "containers" and choices:
+            hint = f"{idx+1}/{len(choices)} | a=alle"
+            safe_addstr(stdscr, bottom_limit, inner_x, hint[:inner_w], 4)
 
         stdscr.refresh()
         ch = stdscr.getch()
@@ -758,7 +786,9 @@ def draw_main(stdscr):
             time.sleep(1)
             continue
 
-        compact_mode = maxy < 26 or maxx < 100
+        tiny_mode = maxy < 18 or maxx < 64
+        compact_mode = maxy < 22 or maxx < 80
+        narrow_mode = maxx < 120
 
         # DATA
         if not state.device_path:
@@ -798,10 +828,12 @@ def draw_main(stdscr):
         safe_addstr(stdscr,3,1,f"KPI   | LIVE HIT/s {hps}   MISS/s {mps}   SRC {state.device_source}")
 
         # -------- GRAPH --------
-        graph_h = 5 if compact_mode else max(8, maxy//3)
+        footer_reserved = 2
+        post_graph_reserved = 8 if compact_mode else (17 if narrow_mode else 15)
+        graph_h = max(5, min(maxy - post_graph_reserved - footer_reserved, maxy // 2))
         graph_y = 5
         graph_x = 8
-        available_graph_w = maxx - graph_x
+        available_graph_w = maxx - graph_x - 1
         graph_w = max(1, available_graph_w)
         if available_graph_w >= 20:
             graph_w = max(20, graph_w)
@@ -814,7 +846,8 @@ def draw_main(stdscr):
         draw_line_graph(stdscr, state.miss, graph_y, graph_x, graph_w, graph_h, 1, maxv)
         draw_line_graph(stdscr, state.hits, graph_y, graph_x, graph_w, graph_h, 2, maxv)
         safe_addstr(stdscr, graph_y + graph_h, graph_x, "└" + ("─" * (graph_w - 1)), 4)
-        safe_addstr(stdscr, graph_y - 1, graph_x, "GRAPH | M=red MISS/s | H=green HIT/s", 4)
+        graph_legend = "GRAPH | M=MISS/s | H=HIT/s" if compact_mode else "GRAPH | M=red MISS/s | H=green HIT/s"
+        safe_addstr(stdscr, graph_y - 1, graph_x, graph_legend, 4)
         scale_col = graph_x + 34
         if scale_col < maxx:
             safe_addstr(stdscr, graph_y - 1, scale_col, f"Scale {maxv}/s", 4)
@@ -825,24 +858,27 @@ def draw_main(stdscr):
         max_m = max(state.miss) if state.miss else 0
         safe_addstr(stdscr, graph_y, graph_x + 2, f"H {hps}/{avg_h:.0f}/{max_h}", 2)
         safe_addstr(stdscr, graph_y + 1, graph_x + 2, f"M {mps}/{avg_m:.0f}/{max_m}", 1)
-        safe_addstr(stdscr, graph_y + graph_h + 1, graph_x, f"window {min(len(state.hits), graph_w)}s (buffer {HISTORY}s)", 4)
+        if not tiny_mode:
+            safe_addstr(stdscr, graph_y + graph_h + 1, graph_x, f"window {min(len(state.hits), graph_w)}s (buffer {HISTORY}s)", 4)
 
         # -------- STATUS --------
         status,color,reason=status_from_metrics(eff,hps,mps,state.miss_trend)
         safe_addstr(stdscr,4+graph_h+1,1,f"HEALTH | PRIMARY ALERT: {status} ({reason})",color)
         eff_arrow = trend_arrow(eff, avg_h and (h0/(h0+m0)*100 if (h0+m0) else eff))
         ratio_arrow = trend_arrow(mps, avg_m)
-        safe_addstr(stdscr,4+graph_h+2,1,f"HEALTH | EFF {eff:.1f}%{eff_arrow} (crit<{EFF_CRITICAL_THRESHOLD:.0f}) | MISS/HIT {ratio_text}{ratio_arrow} (crit≥{MISS_HIT_RATIO_CRITICAL:.2f})", color)
+        if not tiny_mode:
+            safe_addstr(stdscr,4+graph_h+2,1,f"HEALTH | EFF {eff:.1f}%{eff_arrow} (crit<{EFF_CRITICAL_THRESHOLD:.0f}) | MISS/HIT {ratio_text}{ratio_arrow} (crit≥{MISS_HIT_RATIO_CRITICAL:.2f})", color)
         if len(state.hits) >= 10 and len(state.miss) >= 10:
             short_h = sum(list(state.hits)[-10:]) / 10
             short_m = sum(list(state.miss)[-10:]) / 10
         else:
             short_h = avg_h
             short_m = avg_m
-        safe_addstr(stdscr,graph_y+graph_h+3,1,f"10s AVG -> H:{short_h:.0f}/s  M:{short_m:.0f}/s  ΔMISS:{pct_change(short_m, avg_m):+.0f}% vs window",4)
+        if not compact_mode:
+            safe_addstr(stdscr,graph_y+graph_h+3,1,f"10s AVG -> H:{short_h:.0f}/s  M:{short_m:.0f}/s  ΔMISS:{pct_change(short_m, avg_m):+.0f}% vs window",4)
 
         if compact_mode:
-            safe_addstr(stdscr, graph_y + graph_h + 5, 1, "COMPACT MODE | Kernmetriken aktiv", 3)
+            safe_addstr(stdscr, graph_y + graph_h + 4, 1, "COMPACT MODE | Kernmetriken priorisiert", 3)
             if state.update_notice: safe_addstr(stdscr,maxy-2,1,state.update_notice,3)
             if state.config_notice: safe_addstr(stdscr,maxy-2,1,state.config_notice,3)
             elif state.device_warning: safe_addstr(stdscr,maxy-2,1,state.device_warning,3)
@@ -856,16 +892,17 @@ def draw_main(stdscr):
 
         # -------- CONTAINERS --------
         y = graph_y+graph_h+5
+        stats_right_x = 32 if maxx >= 100 else max(1, maxx // 2)
         safe_addstr(stdscr,y,1,"CONTAINERS | CACHE NUMBERS",4)
         y += 1
         safe_addstr(stdscr,y,1,f"Total Hits:   {h0:,}")
-        safe_addstr(stdscr,y,32,f"Total Misses: {m0:,}")
+        safe_addstr(stdscr,y,stats_right_x,f"Total Misses: {m0:,}")
         y += 1
         safe_addstr(stdscr,y,1,f"Efficiency:   {eff:6.2f}%")
-        safe_addstr(stdscr,y,32,f"Miss/Hit:     {ratio_text}")
+        safe_addstr(stdscr,y,stats_right_x,f"Miss/Hit:     {ratio_text}")
         y += 1
         safe_addstr(stdscr,y,1,f"Peak Hit/s:   {max_h:>6}")
-        safe_addstr(stdscr,y,32,f"Peak Miss/s:  {max_m:>6}")
+        safe_addstr(stdscr,y,stats_right_x,f"Peak Miss/s:  {max_m:>6}")
         y += 2
         safe_addstr(stdscr,y,1,"CONTAINERS",4)
         y+=1
@@ -877,75 +914,113 @@ def draw_main(stdscr):
         selection_label = f"{len(state.selected_containers)} selected" if state.selected_containers else "ALL (empty selection)"
         safe_addstr(stdscr, y, 1, f"Containers: {selection_label}", 4)
         y += 1
-        safe_addstr(stdscr,y,32,f"DATA: SYSFS {'OK' if sysfs_ok else 'MISSING'} | DOCKER {state.docker_state}", 4)
+        data_line = f"DATA: SYSFS {'OK' if sysfs_ok else 'MISSING'} | DOCKER {state.docker_state}"
+        if narrow_mode:
+            safe_addstr(stdscr, y, 1, data_line, 4)
+            y += 1
+        else:
+            safe_addstr(stdscr,y,32,data_line,4)
+            y += 1
         y += 1
         table_start_x = 1
-        table_usable_w = max(1, maxx - table_start_x)
-        min_name_col_w = 8
-        min_cpu_col_w = 10
-        min_mem_col_w = 10
-        min_total_w = min_name_col_w + min_cpu_col_w + min_mem_col_w
 
-        if table_usable_w <= min_total_w:
-            # Deterministisch schrumpfen: zuerst Name, dann CPU, dann RAM.
-            name_col_w = min_name_col_w
-            cpu_col_w = min_cpu_col_w
-            mem_col_w = min_mem_col_w
-            overflow = min_total_w - table_usable_w
-
-            shrink = min(overflow, max(0, name_col_w - 1))
-            name_col_w -= shrink
-            overflow -= shrink
-            shrink = min(overflow, max(0, cpu_col_w - 1))
-            cpu_col_w -= shrink
-            overflow -= shrink
-            shrink = min(overflow, max(0, mem_col_w - 1))
-            mem_col_w -= shrink
+        if narrow_mode:
+            safe_addstr(stdscr, y, table_start_x, "NAME", 4)
+            y += 1
+            row_cost = 3
+            available_rows = (maxy - 2) - y
+            if available_rows < row_cost:
+                safe_addstr(stdscr, y, table_start_x, "Nicht genug Platz für Containeranzeige.", 3)
+            for name, cpu, mem, mem_usage_raw in state.docker_cache:
+                if y + 2 >= maxy - 2:
+                    break
+                max_name_len = max(8, maxx - 2)
+                disp_name = name if len(name) <= max_name_len else name[:max_name_len-1] + "…"
+                safe_addstr(stdscr, y, table_start_x, disp_name)
+                y += 1
+                cpu_room = max(0, maxx - 14)
+                mem_room = cpu_room
+                mem_bytes = parse_docker_mem_usage_bytes(mem_usage_raw)
+                mem_text = format_dirty_value(mem_bytes) if mem_bytes is not None else "N/A"
+                bar_cpu = "█" * int((max(0.0, min(cpu, 100.0)) / 100) * cpu_room) if cpu_room else ""
+                bar_mem = "█" * int((max(0.0, min(mem, 100.0)) / 100) * mem_room) if mem_room else ""
+                safe_addstr(stdscr, y, table_start_x, f"C {cpu:5.1f}% {bar_cpu}", 2)
+                y += 1
+                safe_addstr(stdscr, y, table_start_x, f"R {mem_text:>8} {bar_mem}", 3)
+                y += 1
         else:
-            # Erst Mindestbreiten, Restbreite bevorzugt an Name verteilen.
-            rest_w = table_usable_w - min_total_w
-            name_extra = int(rest_w * 0.70)
-            cpu_extra = int(rest_w * 0.15)
-            mem_extra = int(rest_w * 0.15)
-            used_extra = name_extra + cpu_extra + mem_extra
-            name_extra += (rest_w - used_extra)
+            table_usable_w = max(1, maxx - table_start_x)
+            min_name_col_w = 8
+            min_cpu_col_w = 10
+            min_mem_col_w = 10
+            min_total_w = min_name_col_w + min_cpu_col_w + min_mem_col_w
 
-            name_col_w = min_name_col_w + name_extra
-            cpu_col_w = min_cpu_col_w + cpu_extra
-            mem_col_w = min_mem_col_w + mem_extra
+            if table_usable_w <= min_total_w:
+                # Deterministisch schrumpfen: zuerst Name, dann CPU, dann RAM.
+                name_col_w = min_name_col_w
+                cpu_col_w = min_cpu_col_w
+                mem_col_w = min_mem_col_w
+                overflow = min_total_w - table_usable_w
 
-        # Sicherheitsnetz: Summe darf nie größer als nutzbare Tabellenbreite sein.
-        total_col_w = name_col_w + cpu_col_w + mem_col_w
-        if total_col_w > table_usable_w:
-            reduce_by = total_col_w - table_usable_w
-            name_shrink = min(reduce_by, max(0, name_col_w - 1))
-            name_col_w -= name_shrink
-            reduce_by -= name_shrink
-            cpu_shrink = min(reduce_by, max(0, cpu_col_w - 1))
-            cpu_col_w -= cpu_shrink
-            reduce_by -= cpu_shrink
-            mem_col_w -= min(reduce_by, max(0, mem_col_w - 1))
+                shrink = min(overflow, max(0, name_col_w - 1))
+                name_col_w -= shrink
+                overflow -= shrink
+                shrink = min(overflow, max(0, cpu_col_w - 1))
+                cpu_col_w -= shrink
+                overflow -= shrink
+                shrink = min(overflow, max(0, mem_col_w - 1))
+                mem_col_w -= shrink
+            else:
+                # Erst Mindestbreiten, Restbreite bevorzugt an Name verteilen.
+                rest_w = table_usable_w - min_total_w
+                name_extra = int(rest_w * 0.70)
+                cpu_extra = int(rest_w * 0.15)
+                mem_extra = int(rest_w * 0.15)
+                used_extra = name_extra + cpu_extra + mem_extra
+                name_extra += (rest_w - used_extra)
 
-        cpu_x = table_start_x + name_col_w
-        mem_x = cpu_x + cpu_col_w
-        safe_addstr(stdscr, y, table_start_x, f"{'NAME':<{name_col_w-1}}{'CPU':>{cpu_col_w}}{'RAM':>{mem_col_w}}", 4)
-        y += 1
-        for name,cpu,mem in state.docker_cache:
-            if y+1 >= maxy:
-                break
-            cpu_room = max(0, cpu_col_w - 10)
-            mem_room = max(0, mem_col_w - 10)
-            bar_cpu = "█" * (int((max(0.0, min(cpu, 100.0)) / 100) * cpu_room) if cpu_room else 0)
-            bar_mem = "█" * (int((max(0.0, min(mem, 100.0)) / 100) * mem_room) if mem_room else 0)
+                name_col_w = min_name_col_w + name_extra
+                cpu_col_w = min_cpu_col_w + cpu_extra
+                mem_col_w = min_mem_col_w + mem_extra
 
-            max_name_len = max(6, name_col_w - 2)
-            disp_name = name if len(name) <= max_name_len else name[:max_name_len-1] + "…"
-            safe_addstr(stdscr,y,table_start_x,f"{disp_name:<{name_col_w-1}}")
-            safe_addstr(stdscr,y,cpu_x,f"C {cpu:5.1f}% {bar_cpu:<{cpu_room}}",2)
-            safe_addstr(stdscr,y,mem_x,f"R {mem:5.1f}% {bar_mem:<{mem_room}}",3)
+            # Sicherheitsnetz: Summe darf nie größer als nutzbare Tabellenbreite sein.
+            total_col_w = name_col_w + cpu_col_w + mem_col_w
+            if total_col_w > table_usable_w:
+                reduce_by = total_col_w - table_usable_w
+                name_shrink = min(reduce_by, max(0, name_col_w - 1))
+                name_col_w -= name_shrink
+                reduce_by -= name_shrink
+                cpu_shrink = min(reduce_by, max(0, cpu_col_w - 1))
+                cpu_col_w -= cpu_shrink
+                reduce_by -= cpu_shrink
+                mem_col_w -= min(reduce_by, max(0, mem_col_w - 1))
 
-            y+=1
+            cpu_x = table_start_x + name_col_w
+            mem_x = cpu_x + cpu_col_w
+            safe_addstr(stdscr, y, table_start_x, f"{'NAME':<{name_col_w-1}}", 4)
+            safe_addstr(stdscr, y, cpu_x, "CPU", 4)
+            safe_addstr(stdscr, y, mem_x, "RAM", 4)
+            y += 1
+            row_cost = 1
+            if (maxy - 2) - y < row_cost:
+                safe_addstr(stdscr, y, table_start_x, "Nicht genug Platz für Containeranzeige.", 3)
+            for name,cpu,mem,mem_usage_raw in state.docker_cache:
+                if y+1 >= maxy:
+                    break
+                cpu_room = max(0, cpu_col_w - 10)
+                mem_room = max(0, mem_col_w - 10)
+                mem_bytes = parse_docker_mem_usage_bytes(mem_usage_raw)
+                mem_text = format_dirty_value(mem_bytes) if mem_bytes is not None else "N/A"
+                bar_cpu = "█" * (int((max(0.0, min(cpu, 100.0)) / 100) * cpu_room) if cpu_room else 0)
+                bar_mem = "█" * (int((max(0.0, min(mem, 100.0)) / 100) * mem_room) if mem_room else 0)
 
+                max_name_len = max(6, name_col_w - 2)
+                disp_name = name if len(name) <= max_name_len else name[:max_name_len-1] + "…"
+                safe_addstr(stdscr,y,table_start_x,f"{disp_name:<{name_col_w-1}}")
+                safe_addstr(stdscr,y,cpu_x,f"C {cpu:5.1f}% {bar_cpu:<{cpu_room}}",2)
+                safe_addstr(stdscr,y,mem_x,f"R {mem_text:>8} {bar_mem:<{mem_room}}",3)
+
+                y+=1
         if state.update_notice: safe_addstr(stdscr,maxy-2,1,state.update_notice,3)
         if state.config_notice: safe_addstr(stdscr,maxy-2,1,state.config_notice,3)
         elif state.device_warning: safe_addstr(stdscr,maxy-2,1,state.device_warning,3)
