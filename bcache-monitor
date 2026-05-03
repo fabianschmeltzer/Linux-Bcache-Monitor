@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import curses, time, subprocess, os, sys, urllib.request, glob, json
+import curses, time, subprocess, os, sys, urllib.request, glob, json, textwrap
 from dataclasses import dataclass, field
 from collections import deque
 
@@ -599,14 +599,21 @@ def draw_settings(stdscr, state):
     selected_device = state.config.get("bcache_device", "").strip()
     idx = 0
     dev_idx = device_choices.index(selected_device) if selected_device in device_choices else 0
+    device_scroll = 0
+    container_scroll = 0
     mode = "containers"
     while True:
         stdscr.erase()
         my, mx = stdscr.getmaxyx()
-        box_w = max(44, min(mx - 4, 96))
-        box_h = max(16, min(my - 4, my - 2))
-        box_x = max(1, (mx - box_w) // 2)
-        box_y = max(1, (my - box_h) // 2)
+        margin_y, margin_x = 1, 1
+        box_w = max(10, mx - (margin_x * 2))
+        box_h = max(10, my - (margin_y * 2))
+        box_x = max(0, (mx - box_w) // 2)
+        box_y = max(0, (my - box_h) // 2)
+        inner_x = box_x + 2
+        inner_w = max(1, box_w - 4)
+        bottom_limit = box_y + box_h - 2
+
         stdscr.attron(curses.color_pair(4)); stdscr.border(); stdscr.attroff(curses.color_pair(4))
         for x in range(box_x, box_x + box_w):
             safe_addstr(stdscr, box_y, x, "─", 4); safe_addstr(stdscr, box_y + box_h - 1, x, "─", 4)
@@ -614,23 +621,70 @@ def draw_settings(stdscr, state):
             safe_addstr(stdscr, y, box_x, "│", 4); safe_addstr(stdscr, y, box_x + box_w - 1, "│", 4)
         safe_addstr(stdscr, box_y, box_x, "┌", 4); safe_addstr(stdscr, box_y, box_x + box_w - 1, "┐", 4)
         safe_addstr(stdscr, box_y + box_h - 1, box_x, "└", 4); safe_addstr(stdscr, box_y + box_h - 1, box_x + box_w - 1, "┘", 4)
-        safe_addstr(stdscr, box_y + 1, box_x + 2, "SETTINGS", 4)
-        safe_addstr(stdscr, box_y + 2, box_x + 2, "↑↓ Navigation | Tab Bereich | Space Auswahl | Enter Speichern | Esc Zurück", 3)
-        safe_addstr(stdscr, box_y + 3, box_x + 2, f"docker ps: {ps_state}", 4)
-        safe_addstr(stdscr, box_y + 4, box_x + 2, "Leere Auswahl = ALLE Container anzeigen", 3)
-        safe_addstr(stdscr, box_y + 5, box_x + 2, "Device (Single-Select):", 4 if mode == "device" else 0)
-        top = box_y + 6
-        if not device_choices: safe_addstr(stdscr, top, box_x + 2, "Keine bcache-Devices gefunden.", 1)
-        for i, name in enumerate(device_choices):
-            marker = "(*)" if name == selected_device else "( )"; prefix = ">" if mode == "device" and i == dev_idx else " "
-            safe_addstr(stdscr, top + i, box_x + 2, f"{prefix} {marker} {name}", 2 if mode == "device" and i == dev_idx else 0)
-        top = top + max(len(device_choices), 1) + 1
-        safe_addstr(stdscr, top - 1, box_x + 2, "Container (Multi-Select):", 4 if mode == "containers" else 0)
-        if not choices: safe_addstr(stdscr, top, box_x + 2, "Keine Container gefunden.", 1)
-        for i, name in enumerate(choices):
-            if top + i >= box_y + box_h - 2: break
-            marker = "[x]" if name in selected else "[ ]"; prefix = ">" if mode == "containers" and i == idx else " "
-            safe_addstr(stdscr, top + i, box_x + 2, f"{prefix} {marker} {name}", 2 if mode == "containers" and i == idx else 0)
+
+        header_lines = ["SETTINGS"]
+        header_lines += textwrap.wrap("↑↓ Navigation | Tab Bereich | Space Auswahl | Enter Speichern | Esc Zurück", width=inner_w)[:2]
+        header_lines += textwrap.wrap(f"docker ps: {ps_state}", width=inner_w)[:1]
+        header_lines += textwrap.wrap("Leere Auswahl = ALLE Container anzeigen", width=inner_w)[:1]
+
+        cur_y = box_y + 1
+        for i, line in enumerate(header_lines):
+            if cur_y > bottom_limit:
+                break
+            color = 4 if i == 0 or line.startswith("docker ps:") else 3
+            safe_addstr(stdscr, cur_y, inner_x, line[:inner_w], color)
+            cur_y += 1
+
+        if cur_y <= bottom_limit:
+            safe_addstr(stdscr, cur_y, inner_x, "Device (Single-Select):"[:inner_w], 4 if mode == "device" else 0)
+            cur_y += 1
+
+        remaining_rows = max(0, bottom_limit - cur_y + 1)
+        device_rows = max(1, remaining_rows // 3) if remaining_rows else 0
+        container_label_y = cur_y + device_rows
+        if container_label_y <= bottom_limit:
+            safe_addstr(stdscr, container_label_y, inner_x, "Container (Multi-Select):"[:inner_w], 4 if mode == "containers" else 0)
+        container_start_y = container_label_y + 1
+        container_rows = max(0, bottom_limit - container_start_y + 1)
+
+        if device_choices:
+            dev_idx = max(0, min(dev_idx, len(device_choices) - 1))
+            device_scroll = min(device_scroll, max(0, len(device_choices) - max(1, device_rows)))
+            if dev_idx < device_scroll:
+                device_scroll = dev_idx
+            elif device_rows > 0 and dev_idx >= device_scroll + device_rows:
+                device_scroll = dev_idx - device_rows + 1
+            visible_devices = device_choices[device_scroll:device_scroll + max(0, device_rows)]
+            for line_no, name in enumerate(visible_devices):
+                y = cur_y + line_no
+                if y > bottom_limit:
+                    break
+                abs_i = device_scroll + line_no
+                marker = "(*)" if name == selected_device else "( )"
+                prefix = ">" if mode == "device" and abs_i == dev_idx else " "
+                safe_addstr(stdscr, y, inner_x, f"{prefix} {marker} {name}"[:inner_w], 2 if mode == "device" and abs_i == dev_idx else 0)
+        elif cur_y <= bottom_limit:
+            safe_addstr(stdscr, cur_y, inner_x, "Keine bcache-Devices gefunden."[:inner_w], 1)
+
+        if choices and container_rows > 0:
+            idx = max(0, min(idx, len(choices) - 1))
+            container_scroll = min(container_scroll, max(0, len(choices) - container_rows))
+            if idx < container_scroll:
+                container_scroll = idx
+            elif idx >= container_scroll + container_rows:
+                container_scroll = idx - container_rows + 1
+            visible_choices = choices[container_scroll:container_scroll + container_rows]
+            for line_no, name in enumerate(visible_choices):
+                y = container_start_y + line_no
+                if y > bottom_limit:
+                    break
+                abs_i = container_scroll + line_no
+                marker = "[x]" if name in selected else "[ ]"
+                prefix = ">" if mode == "containers" and abs_i == idx else " "
+                safe_addstr(stdscr, y, inner_x, f"{prefix} {marker} {name}"[:inner_w], 2 if mode == "containers" and abs_i == idx else 0)
+        elif container_start_y <= bottom_limit:
+            safe_addstr(stdscr, container_start_y, inner_x, "Keine Container gefunden."[:inner_w], 1)
+
         stdscr.refresh()
         ch = stdscr.getch()
         if ch in [27, ord("q"), ord("Q")]: return
