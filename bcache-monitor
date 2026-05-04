@@ -3,7 +3,7 @@ import curses, time, subprocess, os, sys, urllib.request, glob, json, textwrap
 from dataclasses import dataclass, field
 from collections import deque
 
-__version__ = "0.5.5"
+__version__ = "0.5.6"
 
 # URLs can be overridden for your publish target, e.g. GitHub raw links.
 VERSION_URL = os.environ.get("BCACHE_MONITOR_VERSION_URL", "https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monitor/main/VERSION")
@@ -11,6 +11,8 @@ SCRIPT_URL = os.environ.get("BCACHE_MONITOR_SCRIPT_URL", "https://raw.githubuser
 BCACHE_ENV_DEVICE = os.environ.get("BCACHE_MONITOR_DEVICE", "").strip()
 FIXED_MAX_PS = int(os.environ.get("BCACHE_MONITOR_MAX_PS", "0") or 0)
 DOCKER_REFRESH_SECONDS = float(os.environ.get("BCACHE_MONITOR_DOCKER_REFRESH_SECONDS", "4"))
+FRAME_SECONDS = float(os.environ.get("BCACHE_MONITOR_FRAME_SECONDS", "0.2"))
+MIN_RATE_SAMPLE_SECONDS = float(os.environ.get("BCACHE_MONITOR_MIN_RATE_SAMPLE_SECONDS", "0.2"))
 HISTORY=240
 TREND_WINDOW=30
 EFF_WARN_THRESHOLD=70.0
@@ -841,7 +843,7 @@ def draw_main(stdscr):
         if not sysfs_ok:
             h0, m0 = state.ph, state.pm
         now=time.time()
-        dt=max(now-state.pt,0.5)
+        dt=max(now-state.pt, MIN_RATE_SAMPLE_SECONDS)
 
         hps=int((h0-state.ph)/dt); mps=int((m0-state.pm)/dt)
         state.ph,state.pm,state.pt=h0,m0,now
@@ -858,7 +860,7 @@ def draw_main(stdscr):
         ratio = (mps / hps) if hps > 0 else (float("inf") if mps > 0 else 0.0)
         ratio_text = "∞" if ratio == float("inf") else f"{ratio:.2f}"
         safe_addstr(stdscr,2,1,f"KPI   | EFF {eff:.1f}%   DIRTY {dirty_display}   MISS/HIT {ratio_text}")
-        safe_addstr(stdscr,3,1,f"KPI   | LIVE HIT/s {hps}   MISS/s {mps}   SRC {state.device_source}")
+        safe_addstr(stdscr,3,1,f"KPI   | LIVE HIT/s {hps}   MISS/s {mps}   SOURCE {state.device_source} (config/env/auto)")
 
         # -------- GRAPH --------
         footer_reserved = 2
@@ -943,7 +945,7 @@ def draw_main(stdscr):
             action = handle_keypress(stdscr.getch(), state)
             if action == "quit": break
             if action == "settings": draw_settings(stdscr, state)
-            time.sleep(1)
+            time.sleep(FRAME_SECONDS)
             continue
 
         # -------- CONTAINERS --------
@@ -1051,11 +1053,14 @@ def draw_main(stdscr):
 
         stdscr.refresh()
 
-        action = handle_keypress(stdscr.getch(), state)
+        key = stdscr.getch()
+        if key == curses.KEY_RESIZE:
+            continue
+        action = handle_keypress(key, state)
         if action == "quit": break
         if action == "settings": draw_settings(stdscr, state)
 
-        time.sleep(1)
+        time.sleep(FRAME_SECONDS)
 
 def main():
     updated_from = os.environ.get("BCACHE_MONITOR_UPDATED_FROM")
