@@ -24,6 +24,8 @@ MISS_TREND_CRITICAL=1.50
 
 MIN_SCRIPT_SIZE_BYTES = 1024
 MAX_SCRIPT_SIZE_BYTES = 512 * 1024
+MAX_UPDATE_FAILURES = 3
+UPDATE_FAIL_COUNT_ENV = "BCACHE_MONITOR_UPDATE_FAIL_COUNT"
 
 def normalize_version_string(value):
     if value is None:
@@ -104,30 +106,84 @@ def print_update_event(message):
     ts = time.strftime("%H:%M:%S")
     print(f"[bcache-monitor][{ts}] {message}", flush=True)
 
+
+def get_update_fail_count():
+    raw = os.environ.get(UPDATE_FAIL_COUNT_ENV, "0").strip()
+    try:
+        return max(0, int(raw))
+    except:
+        return 0
+
+
+def set_update_fail_count(value):
+    os.environ[UPDATE_FAIL_COUNT_ENV] = str(max(0, int(value)))
+
+
+def mark_update_failure(reason):
+    fail_count = get_update_fail_count() + 1
+    set_update_fail_count(fail_count)
+    print_update_event(f"Update fehlgeschlagen ({fail_count}/{MAX_UPDATE_FAILURES}): {reason}")
+    if fail_count >= MAX_UPDATE_FAILURES:
+        print_update_event("Update-Strategie gesperrt: 3 Fehlversuche erreicht, starte installierte Version ohne Update")
+
+
+def reset_update_fail_count():
+    if get_update_fail_count() > 0:
+        set_update_fail_count(0)
+
 def self_update_if_needed():
+    fail_count = get_update_fail_count()
+    if fail_count >= MAX_UPDATE_FAILURES:
+        print_update_event("Update übersprungen: Fehlversuch-Limit erreicht")
+        return False
+
+    recently_updated_to = normalize_version_string(os.environ.get("BCACHE_MONITOR_UPDATED_TO", ""))
+    if recently_updated_to:
+        if parse_version(recently_updated_to) >= parse_version(__version__):
+            print_update_event(
+                f"Update-Check übersprungen nach Neustart (lokal {__version__}, zuletzt aktualisiert auf {recently_updated_to})"
+            )
+            return False
+
     remote_version_raw = read_remote_text(VERSION_URL)
     remote_version = normalize_version_string(remote_version_raw)
     if not is_valid_version_string(remote_version):
-        print_update_event(f"Update übersprungen: ungültige Remote-Version '{remote_version_raw}'")
+        mark_update_failure(f"ungültige Remote-Version '{remote_version_raw}'")
         return False
 
     if parse_version(remote_version) <= parse_version(__version__):
+        reset_update_fail_count()
         return False
 
     print_update_event(f"Update verfügbar: {__version__} -> {remote_version}")
 
     script_bytes = read_remote_bytes(SCRIPT_URL)
     if not script_bytes:
-        print_update_event("Update abgebrochen: Script konnte nicht geladen werden")
+        mark_update_failure("Script konnte nicht geladen werden")
         return False
 
     script_content = script_bytes.decode("utf-8", errors="replace")
     if not script_content.startswith("#!/usr/bin/env python3"):
+        mark_update_failure("ungültiger Script-Header")
+        return False
+
+    downloaded_version = ""
+    for line in script_content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("__version__"):
+            _, _, rhs = stripped.partition("=")
+            downloaded_version = normalize_version_string(rhs.strip().strip('"\''))
+            break
+    if not is_valid_version_string(downloaded_version):
+        mark_update_failure("Script enthält keine gültige __version__")
+        return False
+    if parse_version(downloaded_version) != parse_version(remote_version):
+        mark_update_failure(f"Versionskonflikt Script={downloaded_version} Remote={remote_version}")
         return False
 
     script_size = len(script_bytes)
     if script_size < MIN_SCRIPT_SIZE_BYTES or script_size > MAX_SCRIPT_SIZE_BYTES:
-        print_update_event("Update abgebrochen: ungültige Scriptgröße")
+        mark_update_failure("ungültige Scriptgröße")
         return False
 
     script_path = os.path.realpath(__file__)
@@ -143,6 +199,7 @@ def self_update_if_needed():
 
         os.chmod(temp_path, current_mode)
         os.replace(temp_path, script_path)
+        reset_update_fail_count()
 
         os.environ["BCACHE_MONITOR_UPDATED_FROM"] = __version__
         os.environ["BCACHE_MONITOR_UPDATED_TO"] = remote_version
@@ -150,7 +207,7 @@ def self_update_if_needed():
         time.sleep(1)
         os.execv(sys.executable, [sys.executable, script_path] + sys.argv[1:])
     except Exception as exc:
-        print_update_event(f"Update fehlgeschlagen: {exc}")
+        mark_update_failure(str(exc))
     finally:
         try:
             if os.path.exists(temp_path):
