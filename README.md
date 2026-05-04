@@ -1,32 +1,45 @@
-# Linux-Bcache-Monitor
+# 🚀 Linux Bcache Monitor
 
-## Installation (einfach)
+A lightweight and fast **Linux bcache monitoring tool** for real-time performance analysis, IO statistics, and cache diagnostics.
+
+> Perfect for homelabs, servers, and SSD + HDD cache setups.
+
+---
+
+## ✨ Features
+
+- 📊 Real-time bcache statistics
+- ⚡ Monitor SSD cache performance
+- 💾 Analyze HDD + SSD hybrid setups
+- 🧠 Simple CLI interface (no dependencies)
+- 🔍 Detect IO bottlenecks
+- 🐧 Works on all major Linux distributions
+
+---
+
+## 📸 Preview
+
+![Demo](./assets/demo.png)
+
+---
+
+## 🧩 What is bcache?
+
+**bcache** is a Linux kernel block layer that allows using an SSD as a cache for slower HDDs.
+
+This tool helps you monitor:
+
+- Cache hit ratio
+- IO throughput
+- Device performance
+- System bottlenecks
+
+---
+
+## 🚀 Installation
 
 Dieses `curl` lädt die Datei in den **aktuellen Pfad** und macht sie direkt ausführbar:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monitor/main/bcache-monitor -o ./bcache-monitor && chmod +x ./bcache-monitor
 ```
-
-Danach starten mit:
-
-```bash
-./bcache-monitor
-```
-
-
-## Auto-Update
-
-Der Auto-Update-Check ist standardmäßig aktiv. Beim Start wird immer geprüft, ob eine neue Version verfügbar ist:
-
-```bash
-export BCACHE_MONITOR_VERSION_URL="https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monitor/main/VERSION"
-export BCACHE_MONITOR_SCRIPT_URL="https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monitor/main/bcache-monitor"
-./bcache-monitor
-```
-
-Sicherheits-/Stabilitätschecks im Update-Prozess:
-- Update nur bei gültiger Versionsnummer (`x.y.z`) und nur wenn neuer als lokal.
-- Script muss mit Python-Shebang starten.
-- Größenlimit für Payload (zu klein/zu groß wird abgelehnt).
-- Atomarer Austausch über temporäre Datei (`os.replace`) statt Direkt-Overwrite.
