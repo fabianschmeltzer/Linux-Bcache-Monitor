@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-import curses, time, subprocess, os, sys, urllib.request, glob, json, textwrap
+import curses, time, subprocess, os, sys, urllib.request, glob, json, textwrap, shutil
 from dataclasses import dataclass, field
 from collections import deque
 
-__version__ = "0.5.7"
+__version__ = "0.5.8"
 
 # URLs can be overridden for your publish target, e.g. GitHub raw links.
 VERSION_URL = os.environ.get("BCACHE_MONITOR_VERSION_URL", "https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monitor/main/VERSION")
 SCRIPT_URL = os.environ.get("BCACHE_MONITOR_SCRIPT_URL", "https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monitor/main/bcache-monitor")
 BCACHE_ENV_DEVICE = os.environ.get("BCACHE_MONITOR_DEVICE", "").strip()
+BCACHE = ""
 FIXED_MAX_PS = int(os.environ.get("BCACHE_MONITOR_MAX_PS", "0") or 0)
 DOCKER_REFRESH_SECONDS = float(os.environ.get("BCACHE_MONITOR_DOCKER_REFRESH_SECONDS", "4"))
 FRAME_SECONDS = float(os.environ.get("BCACHE_MONITOR_FRAME_SECONDS", "0.2"))
@@ -276,6 +277,15 @@ def parse_docker_block_io_bytes(block_io_raw):
     return parse_sysfs_size_bytes(left)
 
 
+def parse_docker_block_io_pair(block_io_raw):
+    if not block_io_raw:
+        return None, None
+    parts = str(block_io_raw).split("/", 1)
+    read_bytes = parse_sysfs_size_bytes(parts[0].strip()) if parts else None
+    write_bytes = parse_sysfs_size_bytes(parts[1].strip()) if len(parts) > 1 else None
+    return read_bytes, write_bytes
+
+
 def format_io_rate(io_bytes_per_second):
     if io_bytes_per_second is None or io_bytes_per_second < 0:
         return "N/A"
@@ -293,21 +303,161 @@ def format_io_rate(io_bytes_per_second):
 
 
 def format_dirty_value(dirty_bytes):
-    if dirty_bytes is None:
+    return format_bytes(dirty_bytes)
+
+
+def format_bytes(value):
+    if value is None:
         return "N/A"
 
-    mib = dirty_bytes / (1024 ** 2)
+    value = float(value)
+    if value < 1024:
+        return f"{value:.0f} B"
+
+    kib = value / 1024
+    if kib < 1024:
+        return f"{kib:.1f} KiB"
+
+    mib = value / (1024 ** 2)
     if mib < 1024:
         return f"{mib:.1f} MiB"
 
-    gib = dirty_bytes / (1024 ** 3)
-    return f"{gib:.1f} GiB"
+    gib = value / (1024 ** 3)
+    if gib < 1024:
+        return f"{gib:.1f} GiB"
+
+    tib = value / (1024 ** 4)
+    return f"{tib:.1f} TiB"
 
 
 def dirty_val():
     if not BCACHE:
         return None
     return parse_sysfs_size_bytes(read(f"{BCACHE}/dirty_data"))
+
+
+def read_int_file(path):
+    raw = read(path)
+    if raw is None:
+        return None
+    try:
+        return int(str(raw).strip())
+    except ValueError:
+        return None
+
+
+def read_block_device_size_bytes(device_name):
+    if not device_name:
+        return None
+    sectors = read_int_file(f"/sys/block/{device_name}/size")
+    if sectors is None:
+        return None
+    return sectors * 512
+
+
+def disk_usage_for_device(device_name):
+    if not device_name:
+        return None
+    mount_candidates = []
+    try:
+        with open("/proc/mounts", "r", encoding="utf-8") as src:
+            for line in src:
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                dev, mountpoint = parts[0], parts[1].replace("\040", " ")
+                if dev == f"/dev/{device_name}" or dev.startswith(f"/dev/{device_name}p"):
+                    mount_candidates.append(mountpoint)
+    except OSError:
+        return None
+    if not mount_candidates:
+        return None
+    mountpoint = sorted(mount_candidates, key=len)[0]
+    try:
+        usage = shutil.disk_usage(mountpoint)
+        return {"mountpoint": mountpoint, "total": usage.total, "used": usage.used, "free": usage.free}
+    except OSError:
+        return None
+
+
+def discover_cache_set_path(bcache_path):
+    if not bcache_path:
+        return ""
+    direct = os.path.join(bcache_path, "cache")
+    if os.path.exists(direct):
+        try:
+            real = os.path.realpath(direct)
+            if os.path.isdir(real):
+                return real
+        except OSError:
+            pass
+
+    stats_path = STATS_TOTAL_PATH or _discover_stats_total_path()
+    if stats_path:
+        parent = os.path.dirname(stats_path)
+        if os.path.isdir(parent):
+            return parent
+
+    candidates = sorted(glob.glob("/sys/fs/bcache/*"))
+    return candidates[0] if candidates else ""
+
+
+def read_cache_device_capacity(cache_set_path):
+    if not cache_set_path:
+        return None
+    capacities = []
+    for cache_path in sorted(glob.glob(os.path.join(cache_set_path, "cache*"))):
+        bucket_size = parse_sysfs_size_bytes(read(os.path.join(cache_path, "bucket_size")))
+        buckets = read_int_file(os.path.join(cache_path, "nbuckets"))
+        if bucket_size is not None and buckets is not None:
+            capacities.append(bucket_size * buckets)
+        else:
+            dev_name = os.path.basename(os.path.realpath(cache_path))
+            capacities.append(read_block_device_size_bytes(dev_name))
+    known = [value for value in capacities if value is not None]
+    return sum(known) if known else None
+
+
+def read_bcache_details(device_name, bcache_path):
+    cache_set_path = discover_cache_set_path(bcache_path)
+    dirty_bytes = dirty_val()
+    cache_capacity = read_cache_device_capacity(cache_set_path)
+    cache_available_percent = _parse_percent(read(f"{bcache_path}/cache_available_percent")) if bcache_path else None
+    if cache_available_percent is None and cache_set_path:
+        cache_available_percent = _parse_percent(read(os.path.join(cache_set_path, "cache_available_percent")))
+
+    cache_available_bytes = None
+    if cache_capacity is not None and cache_available_percent is not None:
+        cache_available_bytes = cache_capacity * (cache_available_percent / 100.0)
+
+    backing_size = read_block_device_size_bytes(device_name)
+    fs_usage = disk_usage_for_device(device_name)
+    writeback_rate_sectors = read_int_file(f"{bcache_path}/writeback_rate") if bcache_path else None
+    writeback_rate_bytes = writeback_rate_sectors * 512 if writeback_rate_sectors is not None else None
+
+    return {
+        "cache_mode": read(f"{bcache_path}/cache_mode") if bcache_path else None,
+        "cache_capacity": cache_capacity,
+        "cache_available_percent": cache_available_percent,
+        "cache_available_bytes": cache_available_bytes,
+        "dirty_bytes": dirty_bytes,
+        "backing_size": backing_size,
+        "fs_usage": fs_usage,
+        "writeback_percent": read(f"{bcache_path}/writeback_percent") if bcache_path else None,
+        "writeback_rate_bytes": writeback_rate_bytes,
+        "writeback_running": read(f"{bcache_path}/writeback_running") if bcache_path else None,
+        "cache_set_path": cache_set_path,
+    }
+
+
+def format_pct(value):
+    return "N/A" if value is None else f"{value:.1f}%"
+
+
+def format_delta_pct(current, baseline):
+    if baseline <= 0:
+        return "n/a"
+    return f"{pct_change(current, baseline):+.0f}%"
 
 def list_bcache_devices():
     candidates = []
@@ -572,6 +722,8 @@ def handle_keypress(key, state):
         return "quit"
     if key in [ord('s'), ord('S')]:
         return "settings"
+    if key in [ord('i'), ord('I')]:
+        return "info"
     if key in [ord('r'), ord('R')]:
         state.docker_last = 0.0
         return "reload"
@@ -845,6 +997,73 @@ def draw_settings(stdscr, state):
             return
 
 
+
+def info_lines(state):
+    issue_url = "https://github.com/fabianschmeltzer/Linux-Bcache-Monitor/issues"
+    return [
+        f"Linux Bcache Monitor v{__version__}",
+        "Credits: by Fabian Schmeltzer",
+        "KI-Hinweis: Dieses Programm wurde mit KI-Unterstützung geschrieben; es kann Fehler enthalten.",
+        f"Bugreports: {issue_url}",
+        "",
+        "Rechtlicher Hinweis (keine Rechtsberatung): Das Tool wird ohne Gewährleistung bereitgestellt. Prüfe vor produktiver Nutzung License, Haftung und Eignung. Ohne explizite Open-Source-Lizenz gelten grundsätzlich die üblichen Urheberrechte; GitHub erlaubt insbesondere das Anzeigen und Forken öffentlicher Repositories innerhalb seiner Plattformbedingungen. Für verbindliche Fragen bitte juristischen Rat einholen.",
+        "",
+        "Werte im Hauptbildschirm:",
+        "EFF: Cache-Effizienz = Total Hits / (Total Hits + Total Misses). Wichtig, weil niedrige Werte bedeuten, dass viele Reads an der HDD statt aus dem SSD-Cache landen.",
+        "DIRTY: Datenmenge, die im Cache liegt und noch auf das Backing Device/HDD zurückgeschrieben werden muss. Wichtig im Writeback-Modus wegen Performance- und Ausfallrisiko.",
+        "MISS/HIT: Verhältnis der aktuellen Misses pro Sekunde zu Hits pro Sekunde. Wichtig, weil Werte >= 1 zeigen, dass mehr Anfragen am Cache vorbeigehen als bedient werden.",
+        "LIVE HIT/s und MISS/s: Momentane Änderung der bcache-Zähler pro Sekunde. Wichtig für Lastspitzen und Live-Diagnose.",
+        "GRAPH: Rote Linie = MISS/s, grüne Linie = HIT/s. Wichtig, um kurze Peaks und Trends schneller zu sehen als in Einzelzahlen.",
+        "H/M current/avg/peak: aktueller Wert, Fenstermittel, Spitzenwert. Wichtig, um Livewerte mit der jüngsten Historie zu vergleichen.",
+        "MIX: Anteil der aktuellen bcache-Ereignisse; M ist Miss-Anteil, H ist Hit-Anteil. Bei 0/s Gesamtlast ist MIX nur rechnerisch 0%/100% und nicht aussagekräftig.",
+        "DELTA: Vergleich aktueller Werte mit dem Fensterdurchschnitt. Wenn der Durchschnitt 0 ist, wird n/a angezeigt, weil Prozentwerte sonst irreführend wären.",
+        "HEALTH: Ampel aus EFF, MISS/HIT und Miss-Trend. Wichtig als schnelle Warnung; sie ersetzt keine Ursachenanalyse.",
+        "CACHE NUMBERS: Totale Hits/Misses, Effizienz, Peak-Raten und Zusatzinfos wie Cache-Modus, Cache-Größe, freier Writeback-Anteil, Dirty-Daten und Writeback-Rate.",
+        "CONTAINERS CPU/RAM/DISK: Docker-Statistiken. DISK zeigt Read- und Write-Rate aus Docker BlockIO-Deltas seit der letzten Aktualisierung.",
+        "",
+        "Zusatzinfos und Grenzen:",
+        "HDD/Backing-Größe: Wird aus /sys/block/<device>/size berechnet. Genutzter/freier Dateisystemplatz wird nur angezeigt, wenn /dev/<device> als Mount in /proc/mounts gefunden wird.",
+        "SSD/Cache-Größe: Wird, soweit sysfs es hergibt, aus bcache cache*/bucket_size * nbuckets berechnet. Freier Writeback-Anteil nutzt cache_available_percent.",
+        "Cache->HDD Schreibgeschwindigkeit: writeback_rate ist die von bcache gemeldete/gedrosselte Hintergrund-Writeback-Rate in Sektoren/s, hier in Bytes/s dargestellt; sie ist nicht immer identisch mit physischer HDD-IO.",
+        "cache_mode: writethrough/writeback/writearound/none bestimmt, wie bcache Reads/Writes behandelt. Besonders writeback kann Dirty-Daten puffern.",
+        "writeback_percent/running: Zielanteil Dirty-Daten und ob Hintergrund-Writeback aktiv ist. Wichtig, damit Dirty-Daten nicht dauerhaft liegen bleiben.",
+        "",
+        "Tasten: Q Beenden | S Settings | R Docker neu laden | I diese Info",
+    ]
+
+
+def draw_info(stdscr, state):
+    scroll = 0
+    while True:
+        stdscr.erase()
+        maxy, maxx = stdscr.getmaxyx()
+        safe_addstr(stdscr, 0, 1, "INFO | Q/Esc zurück | ↑↓ scroll | PgUp/PgDn", 4)
+        width = max(20, maxx - 4)
+        wrapped = []
+        for line in info_lines(state):
+            if not line:
+                wrapped.append("")
+            else:
+                wrapped.extend(textwrap.wrap(line, width=width) or [""])
+        visible_h = max(1, maxy - 2)
+        scroll = max(0, min(scroll, max(0, len(wrapped) - visible_h)))
+        for idx, line in enumerate(wrapped[scroll:scroll + visible_h]):
+            safe_addstr(stdscr, idx + 1, 1, line[:width], 0)
+        if len(wrapped) > visible_h:
+            safe_addstr(stdscr, maxy - 1, 1, f"{scroll + 1}-{min(scroll + visible_h, len(wrapped))}/{len(wrapped)}", 4)
+        stdscr.refresh()
+        ch = stdscr.getch()
+        if ch in [27, ord('q'), ord('Q'), ord('i'), ord('I')]:
+            return
+        if ch in [curses.KEY_DOWN, ord('j')]:
+            scroll += 1
+        elif ch in [curses.KEY_UP, ord('k')]:
+            scroll -= 1
+        elif ch == curses.KEY_NPAGE:
+            scroll += visible_h
+        elif ch == curses.KEY_PPAGE:
+            scroll -= visible_h
+
 def draw_main(stdscr):
     curses.curs_set(0)
     stdscr.nodelay(True)
@@ -907,7 +1126,8 @@ def draw_main(stdscr):
         state.hits.append(hps); state.miss.append(mps); state.miss_trend.append(mps)
 
         eff=h0/(h0+m0)*100 if (h0+m0) else 0
-        dirty_bytes=dirty_val()
+        details = read_bcache_details(state.device_name, state.device_path)
+        dirty_bytes = details["dirty_bytes"]
         dirty_display=format_dirty_value(dirty_bytes)
 
         # -------- HEADER --------
@@ -917,7 +1137,10 @@ def draw_main(stdscr):
         ratio = (mps / hps) if hps > 0 else (float("inf") if mps > 0 else 0.0)
         ratio_text = "∞" if ratio == float("inf") else f"{ratio:.2f}"
         safe_addstr(stdscr,2,1,f"KPI   | EFF {eff:.1f}%   DIRTY {dirty_display}   MISS/HIT {ratio_text}")
-        safe_addstr(stdscr,3,1,f"KPI   | LIVE HIT/s {hps}   MISS/s {mps}   SOURCE {state.device_source} (config/env/auto)")
+        source_text = f"KPI   | LIVE HIT/s {hps}   MISS/s {mps}   SOURCE {state.device_source}"
+        if maxx >= 96:
+            source_text += " (config/env/auto)"
+        safe_addstr(stdscr,3,1,source_text)
 
         # -------- GRAPH --------
         footer_reserved = 2
@@ -947,11 +1170,11 @@ def draw_main(stdscr):
         draw_line_graph(stdscr, state.miss, graph_y, graph_x, graph_w, graph_h, 1, maxv)
         draw_line_graph(stdscr, state.hits, graph_y, graph_x, graph_w, graph_h, 2, maxv)
         safe_addstr(stdscr, graph_y + graph_h, graph_x, "└" + ("─" * (graph_w - 1)), 4)
-        graph_legend = "GRAPH | M=MISS/s | H=HIT/s | ● latest | · history" if compact_mode else "GRAPH | M=red MISS/s | H=green HIT/s | ● latest point | · history"
+        if compact_mode:
+            graph_legend = "GRAPH | red=MISS/s green=HIT/s"
+        else:
+            graph_legend = f"GRAPH | red=MISS/s | green=HIT/s | Scale {maxv}/s | ◆ latest | • history"
         safe_addstr(stdscr, graph_y - 1, graph_x, graph_legend, 6)
-        scale_col = graph_x + 34
-        if scale_col < maxx:
-            safe_addstr(stdscr, graph_y - 1, scale_col, f"Scale {maxv}/s", 6)
         point_help = "Points: 1 point = 1s | ◆ = latest value | • = history"
         safe_addstr(stdscr, graph_y + graph_h + 1, graph_x, point_help, 6)
 
@@ -963,8 +1186,9 @@ def draw_main(stdscr):
         # Legend for values: current / average / peak
         h_part = f"H {hps:>4}/{avg_h:>4.0f}/{max_h:>4}"
         m_part = f"M {mps:>4}/{avg_m:>4.0f}/{max_m:>4}"
-        mix_part = f"MIX M:{miss_share:>5.1f}% H:{100.0-miss_share:>5.1f}%"
-        delta_part = f"Δ M:{pct_change(mps, avg_m):+5.0f}% H:{pct_change(hps, avg_h):+5.0f}%"
+        hit_share = (hps / (hps + mps) * 100.0) if (hps + mps) > 0 else 0.0
+        mix_part = f"MIX M:{miss_share:>5.1f}% H:{hit_share:>5.1f}%" if (hps + mps) > 0 else "MIX idle"
+        delta_part = f"Δ M:{format_delta_pct(mps, avg_m)} H:{format_delta_pct(hps, avg_h)}"
         safe_addstr(stdscr, graph_y + graph_h + 2, graph_x, h_part, 2)
         x_off = graph_x + len(h_part)
         safe_addstr(stdscr, graph_y + graph_h + 2, x_off, " | ", 6)
@@ -982,7 +1206,8 @@ def draw_main(stdscr):
         eff_arrow = trend_arrow(eff, avg_h and (h0/(h0+m0)*100 if (h0+m0) else eff))
         ratio_arrow = trend_arrow(mps, avg_m)
         if not tiny_mode:
-            safe_addstr(stdscr,4+graph_h+2,1,f"HEALTH | EFF {eff:.1f}%{eff_arrow} (crit<{EFF_CRITICAL_THRESHOLD:.0f}) | MISS/HIT {ratio_text}{ratio_arrow} (crit≥{MISS_HIT_RATIO_CRITICAL:.2f})", color)
+            health_text = f"HEALTH | EFF {eff:.1f}%{eff_arrow} crit<{EFF_CRITICAL_THRESHOLD:.0f} | MISS/HIT {ratio_text}{ratio_arrow} crit≥{MISS_HIT_RATIO_CRITICAL:.2f}"
+            safe_addstr(stdscr,4+graph_h+2,1,health_text, color)
         if len(state.hits) >= 10 and len(state.miss) >= 10:
             short_h = sum(list(state.hits)[-10:]) / 10
             short_m = sum(list(state.miss)[-10:]) / 10
@@ -990,18 +1215,19 @@ def draw_main(stdscr):
             short_h = avg_h
             short_m = avg_m
         if not compact_mode:
-            safe_addstr(stdscr,graph_y+graph_h+4,1,f"10s AVG -> H:{short_h:.0f}/s  M:{short_m:.0f}/s  ΔMISS:{pct_change(short_m, avg_m):+.0f}% vs window",4)
+            safe_addstr(stdscr,graph_y+graph_h+4,1,f"10s AVG -> H:{short_h:.0f}/s  M:{short_m:.0f}/s  ΔMISS:{format_delta_pct(short_m, avg_m)} vs window",4)
 
         if compact_mode:
             safe_addstr(stdscr, graph_y + graph_h + 4, 1, "COMPACT MODE | Core metrics prioritized", 3)
             if state.update_notice: safe_addstr(stdscr,maxy-2,1,state.update_notice,3)
             if state.config_notice: safe_addstr(stdscr,maxy-2,1,state.config_notice,3)
             elif state.device_warning: safe_addstr(stdscr,maxy-2,1,state.device_warning,3)
-            safe_addstr(stdscr,maxy-1,1,"FOOTER/HOTKEYS | Q quit | S settings | R reload",4)
+            safe_addstr(stdscr,maxy-1,1,"FOOTER/HOTKEYS | Q quit | S settings | R reload | I info",4)
             stdscr.refresh()
             action = handle_keypress(stdscr.getch(), state)
             if action == "quit": break
             if action == "settings": draw_settings(stdscr, state)
+            if action == "info": draw_info(stdscr, state)
             time.sleep(FRAME_SECONDS)
             continue
 
@@ -1018,6 +1244,18 @@ def draw_main(stdscr):
         y += 1
         safe_addstr(stdscr,y,1,f"Peak Hit/s:   {max_h:>6}")
         safe_addstr(stdscr,y,stats_right_x,f"Peak Miss/s:  {max_m:>6}")
+        y += 1
+        safe_addstr(stdscr,y,1,f"Mode:         {details['cache_mode'] or 'N/A'}")
+        safe_addstr(stdscr,y,stats_right_x,f"WB rate:      {format_io_rate(details['writeback_rate_bytes'])}")
+        y += 1
+        safe_addstr(stdscr,y,1,f"SSD cache:    {format_bytes(details['cache_capacity'])}")
+        safe_addstr(stdscr,y,stats_right_x,f"Avail WB:     {format_pct(details['cache_available_percent'])} {format_bytes(details['cache_available_bytes'])}")
+        y += 1
+        fs_usage = details['fs_usage']
+        hdd_text = format_bytes(fs_usage['total']) if fs_usage else format_bytes(details['backing_size'])
+        hdd_used = f"used {format_bytes(fs_usage['used'])} free {format_bytes(fs_usage['free'])}" if fs_usage else "used/free N/A"
+        safe_addstr(stdscr,y,1,f"HDD/backing:  {hdd_text}")
+        safe_addstr(stdscr,y,stats_right_x,hdd_used)
         y += 2
         safe_addstr(stdscr,y,1,"CONTAINERS",4)
         y+=1
@@ -1074,19 +1312,31 @@ def draw_main(stdscr):
             mem_room = max(0, mem_col_w - 11)
             mem_bytes = parse_docker_mem_usage_bytes(mem_usage_raw)
             mem_text = format_dirty_value(mem_bytes) if mem_bytes is not None else "N/A"
-            io_bytes = parse_docker_block_io_bytes(block_io_raw)
+            read_bytes, write_bytes = parse_docker_block_io_pair(block_io_raw)
 
-            io_rate = None
-            if io_bytes is not None:
-                current_io_totals[name] = (io_bytes, now_ts)
+            read_rate = None
+            write_rate = None
+            if read_bytes is not None or write_bytes is not None:
+                current_io_totals[name] = ((read_bytes or 0, write_bytes or 0), now_ts)
                 prev_sample = state.docker_io_prev.get(name)
                 if prev_sample:
-                    prev_bytes, prev_ts = prev_sample
+                    prev_totals, prev_ts = prev_sample
+                    if isinstance(prev_totals, tuple):
+                        prev_read, prev_write = prev_totals
+                    else:
+                        prev_read, prev_write = prev_totals, 0
                     elapsed = now_ts - prev_ts
-                    delta = io_bytes - prev_bytes
-                    if elapsed > 0 and delta >= 0:
-                        io_rate = delta / elapsed
-            io_text = format_io_rate(io_rate)
+                    read_delta = (read_bytes or 0) - prev_read
+                    write_delta = (write_bytes or 0) - prev_write
+                    if elapsed > 0 and read_delta >= 0:
+                        read_rate = read_delta / elapsed
+                    if elapsed > 0 and write_delta >= 0:
+                        write_rate = write_delta / elapsed
+            if io_col_w >= 26:
+                io_text = f"R {format_io_rate(read_rate)} W {format_io_rate(write_rate)}"
+            else:
+                total_rate = None if read_rate is None and write_rate is None else (read_rate or 0) + (write_rate or 0)
+                io_text = format_io_rate(total_rate)
             bar_cpu, bar_cpu_empty = draw_meter(cpu, cpu_room, 2, empty_char=" ")
             bar_mem, bar_mem_empty = draw_meter(mem, mem_room, 3, empty_char=" ")
 
@@ -1099,14 +1349,14 @@ def draw_main(stdscr):
             safe_addstr(stdscr,y,mem_x,f"R {mem_text:>8} ",6)
             safe_addstr(stdscr,y,mem_x + 11,bar_mem,3)
             safe_addstr(stdscr,y,mem_x + 11 + len(bar_mem),bar_mem_empty,6)
-            safe_addstr(stdscr,y,io_x,f"D {io_text:>8}",6)
+            safe_addstr(stdscr,y,io_x,f"D {io_text}",6)
             y+=1
         state.docker_io_prev = current_io_totals
 
         if state.update_notice: safe_addstr(stdscr,maxy-2,1,state.update_notice,3)
         if state.config_notice: safe_addstr(stdscr,maxy-2,1,state.config_notice,3)
         elif state.device_warning: safe_addstr(stdscr,maxy-2,1,state.device_warning,3)
-        safe_addstr(stdscr,maxy-1,1,"FOOTER/HOTKEYS | Q quit | S settings | R reload",4)
+        safe_addstr(stdscr,maxy-1,1,"FOOTER/HOTKEYS | Q quit | S settings | R reload | I info",4)
 
         stdscr.refresh()
 
@@ -1116,6 +1366,7 @@ def draw_main(stdscr):
         action = handle_keypress(key, state)
         if action == "quit": break
         if action == "settings": draw_settings(stdscr, state)
+        if action == "info": draw_info(stdscr, state)
 
         time.sleep(FRAME_SECONDS)
 
