@@ -3,7 +3,7 @@ import curses, time, subprocess, os, sys, urllib.request, glob, json, textwrap, 
 from dataclasses import dataclass, field
 from collections import deque
 
-__version__ = "0.5.9"
+__version__ = "0.5.10"
 
 # URLs can be overridden for your publish target, e.g. GitHub raw links.
 VERSION_URL = os.environ.get("BCACHE_MONITOR_VERSION_URL", "https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monitor/main/VERSION")
@@ -452,6 +452,20 @@ def read_bcache_details(device_name, bcache_path):
 
 def format_pct(value):
     return "N/A" if value is None else f"{value:.1f}%"
+
+
+def format_cache_mode(cache_mode_raw):
+    if not cache_mode_raw:
+        return "N/A"
+
+    token = str(cache_mode_raw).strip()
+    for part in token.split():
+        if part.startswith("[") and part.endswith("]"):
+            active_mode = part.strip("[]").strip()
+            if active_mode:
+                return active_mode
+
+    return token
 
 
 def format_delta_pct(current, baseline):
@@ -1261,7 +1275,7 @@ def draw_main(stdscr):
         safe_addstr(stdscr,y,1,f"Peak Hit/s:   {max_h:>6}")
         safe_addstr(stdscr,y,stats_right_x,f"Peak Miss/s:  {max_m:>6}")
         y += 1
-        safe_addstr(stdscr,y,1,f"Mode:         {details['cache_mode'] or 'N/A'}")
+        safe_addstr(stdscr,y,1,f"Mode:         {format_cache_mode(details['cache_mode'])}")
         safe_addstr(stdscr,y,stats_right_x,f"WB rate:      {format_io_rate(details['writeback_rate_bytes'])}")
         y += 1
         safe_addstr(stdscr,y,1,f"SSD cache:    {format_bytes(details['cache_capacity'])}")
