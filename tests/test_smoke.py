@@ -21,6 +21,21 @@ def test_format_delta_pct_suppresses_zero_baseline_percentages():
     assert bcache_monitor.format_delta_pct(0, 0) == "n/a"
 
 
+def test_format_ratio_keeps_small_nonzero_ratios_visible():
+    assert bcache_monitor.format_ratio(1, 4935) == "<0.01"
+
+
+def test_format_ratio_reports_total_miss_hit_ratio():
+    assert bcache_monitor.format_ratio(2_012_657, 2_147_224) == "0.94"
+
+
+def test_format_fs_usage_summary_includes_used_percent():
+    summary = bcache_monitor.format_fs_usage_summary({"total": 100, "used": 75, "free": 25})
+
+    assert "used 75 B (75.0%)" in summary
+    assert "free 25 B" in summary
+
+
 def test_format_cache_mode_shows_only_active_bracketed_mode():
     assert bcache_monitor.format_cache_mode("writethrough [writeback] writearound none") == "writeback"
 

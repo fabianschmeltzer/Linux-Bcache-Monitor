@@ -306,6 +306,48 @@ def format_dirty_value(dirty_bytes):
     return format_bytes(dirty_bytes)
 
 
+def format_ratio(numerator, denominator):
+    if denominator <= 0:
+        return "∞" if numerator > 0 else "0"
+
+    ratio = numerator / denominator
+    if ratio == 0:
+        return "0"
+    if ratio < 0.01:
+        return "<0.01"
+    if ratio < 10:
+        return f"{ratio:.2f}"
+    if ratio < 100:
+        return f"{ratio:.1f}"
+    return f"{ratio:.0f}"
+
+
+def format_count_rate(value):
+    return f"{int(value):,}/s"
+
+
+def format_fs_usage_summary(fs_usage):
+    if not fs_usage:
+        return "used/free N/A"
+
+    total = fs_usage.get("total") or 0
+    used = fs_usage.get("used") or 0
+    free = fs_usage.get("free") or 0
+    used_pct = (used / total * 100.0) if total > 0 else None
+    pct_text = f" ({used_pct:.1f}%)" if used_pct is not None else ""
+    return f"used {format_bytes(used)}{pct_text} free {format_bytes(free)}"
+
+
+def format_writeback_state(details):
+    target = details.get("writeback_percent") or "N/A"
+    running_raw = details.get("writeback_running")
+    if running_raw is None:
+        running = "N/A"
+    else:
+        running = "yes" if str(running_raw).strip() not in ("0", "false", "False", "no") else "no"
+    return f"target {target} run {running}"
+
+
 def format_bytes(value):
     if value is None:
         return "N/A"
@@ -1039,18 +1081,18 @@ def info_lines(state):
         "Werte im Hauptbildschirm:",
         "EFF: Cache-Effizienz = Total Hits / (Total Hits + Total Misses). Wichtig, weil niedrige Werte bedeuten, dass viele Reads an der HDD statt aus dem SSD-Cache landen.",
         "DIRTY: Datenmenge, die im Cache liegt und noch auf das Backing Device/HDD zurückgeschrieben werden muss. Wichtig im Writeback-Modus wegen Performance- und Ausfallrisiko.",
-        "MISS/HIT: Verhältnis der aktuellen Misses pro Sekunde zu Hits pro Sekunde. Wichtig, weil Werte >= 1 zeigen, dass mehr Anfragen am Cache vorbeigehen als bedient werden.",
+        "LIVE M/H / MISS/HIT: Verhältnis der aktuellen Misses pro Sekunde zu Hits pro Sekunde. Kleine Nicht-Null-Werte werden als <0.01 statt 0.00 angezeigt; Werte >= 1 zeigen, dass mehr Anfragen am Cache vorbeigehen als bedient werden.",
         "LIVE HIT/s und MISS/s: Momentane Änderung der bcache-Zähler pro Sekunde. Wichtig für Lastspitzen und Live-Diagnose.",
         "GRAPH: Rote Linie = MISS/s, grüne Linie = HIT/s. Wichtig, um kurze Peaks und Trends schneller zu sehen als in Einzelzahlen.",
         "H/M current/avg/peak: aktueller Wert, Fenstermittel, Spitzenwert. Wichtig, um Livewerte mit der jüngsten Historie zu vergleichen.",
         "MIX: Anteil der aktuellen bcache-Ereignisse; M ist Miss-Anteil, H ist Hit-Anteil. Bei 0/s Gesamtlast ist MIX nur rechnerisch 0%/100% und nicht aussagekräftig.",
         "DELTA: Vergleich aktueller Werte mit dem Fensterdurchschnitt. Wenn der Durchschnitt 0 ist, wird n/a angezeigt, weil Prozentwerte sonst irreführend wären.",
         "HEALTH: Ampel aus EFF, MISS/HIT und Miss-Trend. Wichtig als schnelle Warnung; sie ersetzt keine Ursachenanalyse.",
-        "CACHE NUMBERS: Totale Hits/Misses, Effizienz, Peak-Raten und Zusatzinfos wie Cache-Modus, Cache-Größe, freier Writeback-Anteil, Dirty-Daten und Writeback-Rate.",
+        "CACHE NUMBERS: Totale Hits/Misses, Total-Miss/Hit-Verhältnis, Live-Raten, Peak-Raten, Cache-Modus, Dirty-Daten, Writeback-Ziel/Laufstatus, freier Writeback-Anteil sowie SSD-/HDD-Größen.",
         "CONTAINERS CPU/RAM/DISK: Docker-Statistiken. DISK zeigt Read- und Write-Rate aus Docker BlockIO-Deltas seit der letzten Aktualisierung.",
         "",
         "Zusatzinfos und Grenzen:",
-        "HDD/Backing-Größe: Wird aus /sys/block/<device>/size berechnet. Genutzter/freier Dateisystemplatz wird nur angezeigt, wenn /dev/<device> als Mount in /proc/mounts gefunden wird.",
+        "HDD/Backing-Größe: Wird aus /sys/block/<device>/size berechnet. Genutzter/freier Dateisystemplatz inklusive Used-Prozentwert wird nur angezeigt, wenn /dev/<device> als Mount in /proc/mounts gefunden wird.",
         "SSD/Cache-Größe: Wird, soweit sysfs es hergibt, aus bcache cache*/bucket_size * nbuckets berechnet. Freier Writeback-Anteil nutzt cache_available_percent.",
         "Cache->HDD Schreibgeschwindigkeit: writeback_rate ist die von bcache gemeldete/gedrosselte Hintergrund-Writeback-Rate in Sektoren/s, hier in Bytes/s dargestellt; sie ist nicht immer identisch mit physischer HDD-IO.",
         "cache_mode: writethrough/writeback/writearound/none bestimmt, wie bcache Reads/Writes behandelt. Besonders writeback kann Dirty-Daten puffern.",
@@ -1162,9 +1204,9 @@ def draw_main(stdscr):
         safe_addstr(stdscr,0,1,f"HEADER | BCACHE OBSERVABILITY v{__version__} | DEVICE {state.device_name or 'N/A'}",6)
 
         # -------- KPI BLOCK --------
-        ratio = (mps / hps) if hps > 0 else (float("inf") if mps > 0 else 0.0)
-        ratio_text = "∞" if ratio == float("inf") else f"{ratio:.2f}"
-        safe_addstr(stdscr,2,1,f"KPI   | EFF {eff:.1f}%   DIRTY {dirty_display}   MISS/HIT {ratio_text}")
+        ratio_text = format_ratio(mps, hps)
+        total_ratio_text = format_ratio(m0, h0)
+        safe_addstr(stdscr,2,1,f"KPI   | EFF {eff:.1f}%   DIRTY {dirty_display}   LIVE M/H {ratio_text}")
         source_text = f"KPI   | LIVE HIT/s {hps}   MISS/s {mps}   SOURCE {state.device_source}"
         if maxx >= 96:
             source_text += " (config/env/auto)"
@@ -1263,29 +1305,36 @@ def draw_main(stdscr):
 
         # -------- CONTAINERS --------
         y = graph_y+graph_h+5
-        stats_right_x = 32 if maxx >= 100 else max(1, maxx // 2)
+        stats_right_x = 40 if maxx >= 110 else (34 if maxx >= 90 else max(1, maxx // 2))
         safe_addstr(stdscr,y,1,"CACHE NUMBERS",4)
         y += 1
         safe_addstr(stdscr,y,1,f"Total Hits:   {h0:,}")
         safe_addstr(stdscr,y,stats_right_x,f"Total Misses: {m0:,}")
         y += 1
         safe_addstr(stdscr,y,1,f"Efficiency:   {eff:6.2f}%")
-        safe_addstr(stdscr,y,stats_right_x,f"Miss/Hit:     {ratio_text}")
+        safe_addstr(stdscr,y,stats_right_x,f"Total M/H:    {total_ratio_text}")
         y += 1
-        safe_addstr(stdscr,y,1,f"Peak Hit/s:   {max_h:>6}")
-        safe_addstr(stdscr,y,stats_right_x,f"Peak Miss/s:  {max_m:>6}")
+        safe_addstr(stdscr,y,1,f"Live Hit/s:   {format_count_rate(hps)}")
+        safe_addstr(stdscr,y,stats_right_x,f"Live Miss/s:  {format_count_rate(mps)}")
+        y += 1
+        safe_addstr(stdscr,y,1,f"Peak Hit/s:   {format_count_rate(max_h)}")
+        safe_addstr(stdscr,y,stats_right_x,f"Peak Miss/s:  {format_count_rate(max_m)}")
         y += 1
         safe_addstr(stdscr,y,1,f"Mode:         {format_cache_mode(details['cache_mode'])}")
-        safe_addstr(stdscr,y,stats_right_x,f"WB rate:      {format_io_rate(details['writeback_rate_bytes'])}")
+        safe_addstr(stdscr,y,stats_right_x,f"Live M/H:     {ratio_text}")
         y += 1
-        safe_addstr(stdscr,y,1,f"SSD cache:    {format_bytes(details['cache_capacity'])}")
+        safe_addstr(stdscr,y,1,f"Dirty:        {dirty_display}")
+        safe_addstr(stdscr,y,stats_right_x,f"WB: {format_writeback_state(details)}")
+        y += 1
+        safe_addstr(stdscr,y,1,f"WB rate:      {format_io_rate(details['writeback_rate_bytes'])}")
         safe_addstr(stdscr,y,stats_right_x,f"Avail WB:     {format_pct(details['cache_available_percent'])} {format_bytes(details['cache_available_bytes'])}")
         y += 1
+        safe_addstr(stdscr,y,1,f"SSD cache:    {format_bytes(details['cache_capacity'])}")
         fs_usage = details['fs_usage']
         hdd_text = format_bytes(fs_usage['total']) if fs_usage else format_bytes(details['backing_size'])
-        hdd_used = f"used {format_bytes(fs_usage['used'])} free {format_bytes(fs_usage['free'])}" if fs_usage else "used/free N/A"
-        safe_addstr(stdscr,y,1,f"HDD/backing:  {hdd_text}")
-        safe_addstr(stdscr,y,stats_right_x,hdd_used)
+        safe_addstr(stdscr,y,stats_right_x,f"HDD/backing:  {hdd_text}")
+        y += 1
+        safe_addstr(stdscr,y,1,format_fs_usage_summary(fs_usage))
         y += 2
         safe_addstr(stdscr,y,1,"CONTAINERS",4)
         y+=1

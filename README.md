@@ -58,7 +58,7 @@ curl -fsSL https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monit
 
 - **EFF:** Cache-Effizienz aus `Total Hits / (Total Hits + Total Misses)`. Niedrige Werte zeigen, dass viele Zugriffe nicht aus dem SSD-Cache bedient werden.
 - **DIRTY:** Datenmenge, die im Cache liegt und noch auf die HDD bzw. das Backing Device geschrieben werden muss. Besonders im Writeback-Modus wichtig.
-- **MISS/HIT:** Verhältnis aktueller Misses pro Sekunde zu Hits pro Sekunde. Werte ab etwa `1.0` bedeuten, dass mindestens so viele Anfragen am Cache vorbeigehen wie aus dem Cache bedient werden.
+- **LIVE M/H / MISS/HIT:** Verhältnis aktueller Misses pro Sekunde zu Hits pro Sekunde. Kleine Nicht-Null-Werte werden als `<0.01` statt `0.00` angezeigt; Werte ab etwa `1.0` bedeuten, dass mindestens so viele Anfragen am Cache vorbeigehen wie aus dem Cache bedient werden.
 - **LIVE HIT/s und MISS/s:** Live-Änderungsrate der bcache-Zähler pro Sekunde.
 - **GRAPH:** Rot zeigt `MISS/s`, grün zeigt `HIT/s`; `◆` markiert den neuesten Punkt, `•` ältere Punkte.
 - **H/M current/avg/peak:** Aktueller Wert, Fensterdurchschnitt und Spitzenwert.
@@ -66,8 +66,8 @@ curl -fsSL https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monit
 - **Δ / DELTA:** Vergleich des aktuellen Werts mit dem Fensterdurchschnitt. Ist der Durchschnitt `0`, wird `n/a` angezeigt.
 - **HEALTH:** Ampelbewertung aus Effizienz, Miss/Hit-Verhältnis und Miss-Trend.
 - **SSD cache / Avail WB:** Cache-Größe und potentiell für Writeback verfügbarer Cache-Anteil, soweit über sysfs auslesbar.
-- **HDD/backing:** Größe des bcache-Blockdevices und, falls gemountet, genutzter/freier Dateisystemplatz.
-- **WB rate:** Von bcache gemeldete Hintergrund-Writeback-Rate (`writeback_rate`) als Bytes/s. Das ist die bcache-Drossel-/Zielrate und nicht zwingend identisch mit physischer HDD-IO.
+- **HDD/backing:** Größe des bcache-Blockdevices und, falls gemountet, genutzter/freier Dateisystemplatz inklusive Used-Prozentwert.
+- **WB / WB rate:** Writeback-Zielanteil, Laufstatus und von bcache gemeldete Hintergrund-Writeback-Rate (`writeback_rate`) als Bytes/s. Das ist die bcache-Drossel-/Zielrate und nicht zwingend identisch mit physischer HDD-IO.
 - **Docker DISK:** Read- und Write-Rate aus Docker `BlockIO`-Deltas seit der letzten Aktualisierung.
 
 Quellen zur Einordnung: Die [Linux-Kernel-Dokumentation](https://docs.kernel.org/admin-guide/bcache.html) beschreibt die bcache-sysfs-Werte wie `dirty_data`, `writeback_percent`, `writeback_rate`, `cache_available_percent`, `bucket_size` und `nbuckets`. [GitHub Docs](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/licensing-a-repository) und [Choose a License](https://choosealicense.com/no-permission/) erläutern die rechtliche Ausgangslage bei Repositories ohne Lizenz.
