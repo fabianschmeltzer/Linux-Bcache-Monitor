@@ -25,3 +25,34 @@ def test_info_lines_include_bugreport_and_ai_notice():
     lines = "\n".join(bcache_monitor.info_lines(None))
     assert "KI-Unterstützung" in lines
     assert "Linux-Bcache-Monitor/issues" in lines
+
+
+class FakeScreen:
+    def __init__(self, height=30, width=80):
+        self.height = height
+        self.width = width
+        self.draws = []
+
+    def getmaxyx(self):
+        return self.height, self.width
+
+    def addstr(self, y, x, text, color=0):
+        self.draws.append((y, x, text, color))
+
+
+def test_graph_points_right_align_short_history_and_hide_zero_values():
+    points = bcache_monitor._graph_points([0, 5, 0], y=2, x=10, w=8, h=5, maxv=10)
+
+    assert [col for _, col, _ in points] == [15, 16, 17]
+    assert points[0][0] is None
+    assert points[2][0] is None
+
+
+def test_draw_line_graph_does_not_draw_vertical_spike_bars_or_zero_baseline():
+    screen = FakeScreen()
+    bcache_monitor.draw_line_graph(screen, [0, 100, 0, 100, 0], y=2, x=10, w=8, h=6, color=2, maxv=100)
+    drawn_text = "".join(text for _, _, text, _ in screen.draws)
+
+    assert "┃" not in drawn_text
+    assert "━" not in drawn_text
+    assert all(row != 2 + 6 - 1 for row, _, _, _ in screen.draws)

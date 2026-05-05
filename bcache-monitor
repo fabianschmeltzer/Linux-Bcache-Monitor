@@ -794,35 +794,49 @@ def draw_area_graph(stdscr,data,y,x,w,h,color):
             safe_addstr(stdscr,y+h-j,x+i,"█",color)
 # ---------- GRAPH ----------
 
-def draw_line_graph(stdscr, data, y, x, w, h, color, maxv):
-    if len(data) < 2 or w < 2 or h < 2:
-        return
+def _graph_points(data, y, x, w, h, maxv):
+    if not data or w < 2 or h < 2:
+        return []
 
     d = list(data)[-w:]
+    start_col = x + max(0, w - len(d))
     points = []
     for i, val in enumerate(d):
-        row = y + h - 1 - int((max(0, val) / maxv) * (h - 1))
+        value = max(0, val)
+        if value <= 0:
+            points.append((None, start_col + i, value))
+            continue
+        row = y + h - 1 - int((value / maxv) * (h - 1))
         row = max(y, min(y + h - 1, row))
-        points.append((row, x + i))
+        points.append((row, start_col + i, value))
+    return points
 
-    prev_row, prev_col = points[0]
-    safe_addstr(stdscr, prev_row, prev_col, "•", color)
 
-    for row, col in points[1:]:
+def draw_line_graph(stdscr, data, y, x, w, h, color, maxv):
+    points = _graph_points(data, y, x, w, h, maxv)
+    if len(points) < 2:
+        return
+
+    visible = [(row, col, value) for row, col, value in points if row is not None]
+    if not visible:
+        return
+
+    for row, col, _ in visible[:-1]:
         safe_addstr(stdscr, row, col, "•", color)
-        if row == prev_row:
-            for c in range(min(prev_col, col) + 1, max(prev_col, col)):
-                safe_addstr(stdscr, row, c, "━", color)
-        else:
-            step = 1 if row > prev_row else -1
-            cur = prev_row
-            while cur != row:
-                cur += step
-                safe_addstr(stdscr, cur, prev_col, "┃", color)
-        prev_row, prev_col = row, col
 
-    latest_row, latest_col = points[-1]
-    safe_addstr(stdscr, latest_row, latest_col, "◆", color)
+    latest_row, latest_col, latest_value = points[-1]
+    if latest_row is not None:
+        safe_addstr(stdscr, latest_row, latest_col, "◆", color)
+    else:
+        last_row, last_col, _ = visible[-1]
+        if latest_value > 0:
+            safe_addstr(stdscr, last_row, last_col, "◆", color)
+
+
+def draw_x_axis(stdscr, y, x, w):
+    if w < 2:
+        return
+    safe_addstr(stdscr, y, x, "└" + ("─" * (w - 1)), 4)
 
 def draw_y_markers(stdscr, y, x, h, maxv):
     ticks = []
@@ -1145,7 +1159,8 @@ def draw_main(stdscr):
         # -------- GRAPH --------
         footer_reserved = 2
         graph_min_h = 4 if compact_mode else 6
-        graph_max_fraction = 0.45 if narrow_mode else 0.50
+        graph_max_fraction = 0.34 if narrow_mode else 0.32
+        graph_max_h = 12 if compact_mode else 16
         # Container-Bereich früher sichtbar machen: feste Reserve für Health + Container-Header/Tabelle.
         reserved_after_graph = 8 if compact_mode else (13 if narrow_mode else 12)
         graph_h = max(
@@ -1153,6 +1168,7 @@ def draw_main(stdscr):
             min(
                 maxy - reserved_after_graph - footer_reserved,
                 int(maxy * graph_max_fraction),
+                graph_max_h,
             ),
         )
         graph_y = 5
@@ -1167,15 +1183,15 @@ def draw_main(stdscr):
         maxv = max(int(state.graph_scale), 1)
 
         draw_y_markers(stdscr, graph_y, graph_x - 1, graph_h, maxv)
+        draw_x_axis(stdscr, graph_y + graph_h - 1, graph_x, graph_w)
         draw_line_graph(stdscr, state.miss, graph_y, graph_x, graph_w, graph_h, 1, maxv)
         draw_line_graph(stdscr, state.hits, graph_y, graph_x, graph_w, graph_h, 2, maxv)
-        safe_addstr(stdscr, graph_y + graph_h, graph_x, "└" + ("─" * (graph_w - 1)), 4)
         if compact_mode:
             graph_legend = "GRAPH | red=MISS/s green=HIT/s"
         else:
-            graph_legend = f"GRAPH | red=MISS/s | green=HIT/s | Scale {maxv}/s | ◆ latest | • history"
+            graph_legend = f"GRAPH | red=MISS/s | green=HIT/s | Scale {maxv}/s | ◆ latest non-zero | • history"
         safe_addstr(stdscr, graph_y - 1, graph_x, graph_legend, 6)
-        point_help = "Points: 1 point = 1s | ◆ = latest value | • = history"
+        point_help = "Points: 1 point = 1s | zero values stay on the axis to avoid fake traffic"
         safe_addstr(stdscr, graph_y + graph_h + 1, graph_x, point_help, 6)
 
         avg_h = (sum(state.hits) / len(state.hits)) if state.hits else 0
