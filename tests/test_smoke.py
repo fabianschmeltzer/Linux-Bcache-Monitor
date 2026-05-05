@@ -21,6 +21,28 @@ def test_format_delta_pct_suppresses_zero_baseline_percentages():
     assert bcache_monitor.format_delta_pct(0, 0) == "n/a"
 
 
+def test_format_cache_mode_shows_only_active_bracketed_mode():
+    assert bcache_monitor.format_cache_mode("writethrough [writeback] writearound none") == "writeback"
+
+
+def test_format_cache_mode_falls_back_to_raw_value():
+    assert bcache_monitor.format_cache_mode("writethrough") == "writethrough"
+
+
+def test_version_metadata_is_in_sync():
+    repo_root = Path(__file__).resolve().parents[1]
+    version = (repo_root / "VERSION").read_text().strip()
+    readme = (repo_root / "README.md").read_text()
+
+    assert bcache_monitor.__version__ == version == "0.5.10"
+    assert f"**Version:** {version}" in readme
+
+
+def test_print_version_and_exit_for_cli_flag(capsys):
+    assert bcache_monitor.print_version_and_exit_if_requested(["bcache-monitor", "--version"]) is True
+    assert capsys.readouterr().out.strip() == "0.5.10"
+
+
 def test_info_lines_include_bugreport_and_ai_notice():
     lines = "\n".join(bcache_monitor.info_lines(None))
     assert "KI-Unterstützung" in lines
