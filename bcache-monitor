@@ -1400,7 +1400,17 @@ def draw_main(stdscr):
 
         time.sleep(FRAME_SECONDS)
 
+def print_version_and_exit_if_requested(argv):
+    if any(arg in ("--version", "-V") for arg in argv[1:]):
+        print(__version__)
+        return True
+    return False
+
+
 def main():
+    if print_version_and_exit_if_requested(sys.argv):
+        return
+
     updated_from = os.environ.get("BCACHE_MONITOR_UPDATED_FROM")
     updated_to = os.environ.get("BCACHE_MONITOR_UPDATED_TO")
     if updated_from and updated_to:
