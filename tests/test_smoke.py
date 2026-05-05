@@ -21,6 +21,14 @@ def test_format_delta_pct_suppresses_zero_baseline_percentages():
     assert bcache_monitor.format_delta_pct(0, 0) == "n/a"
 
 
+def test_format_cache_mode_shows_only_active_bracketed_mode():
+    assert bcache_monitor.format_cache_mode("writethrough [writeback] writearound none") == "writeback"
+
+
+def test_format_cache_mode_falls_back_to_raw_value():
+    assert bcache_monitor.format_cache_mode("writethrough") == "writethrough"
+
+
 def test_info_lines_include_bugreport_and_ai_notice():
     lines = "\n".join(bcache_monitor.info_lines(None))
     assert "KI-Unterstützung" in lines

@@ -48,7 +48,7 @@ curl -fsSL https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monit
 
 ## ℹ️ Info, Credits und rechtliche Hinweise
 
-- **Version:** 0.5.8
+- **Version:** 0.5.10
 - **Credits:** by Fabian Schmeltzer
 - **KI-Hinweis:** Dieses Programm wurde mit KI-Unterstützung geschrieben und kann Fehler enthalten. Bitte prüfe kritische Ausgaben und verwende das Tool auf eigene Verantwortung.
 - **Bugreports:** Bitte Fehler und Verbesserungsvorschläge über die GitHub-Issues melden: <https://github.com/fabianschmeltzer/Linux-Bcache-Monitor/issues>
