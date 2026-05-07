@@ -3,7 +3,7 @@ import curses, time, subprocess, os, sys, urllib.request, glob, json, textwrap, 
 from dataclasses import dataclass, field
 from collections import deque
 
-__version__ = "0.5.10"
+__version__ = "0.5.11"
 
 # URLs can be overridden for your publish target, e.g. GitHub raw links.
 VERSION_URL = os.environ.get("BCACHE_MONITOR_VERSION_URL", "https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monitor/main/VERSION")
@@ -22,6 +22,8 @@ MISS_HIT_RATIO_WARN=0.75
 MISS_HIT_RATIO_CRITICAL=1.10
 MISS_TREND_WARN=1.20
 MISS_TREND_CRITICAL=1.50
+MIN_DELTA_BASELINE_PS=1.0
+MIN_HEALTH_TREND_EVENTS=3
 
 MIN_SCRIPT_SIZE_BYTES = 1024
 MAX_SCRIPT_SIZE_BYTES = 512 * 1024
@@ -355,27 +357,69 @@ def read_block_device_size_bytes(device_name):
     return sectors * 512
 
 
+def _decode_mount_field(value):
+    return (
+        str(value)
+        .replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
+    )
+
+def _device_matches(candidate, device_name):
+    if not candidate or not device_name or not candidate.startswith("/dev/"):
+        return False
+    target = os.path.realpath(f"/dev/{device_name}")
+    real_candidate = os.path.realpath(candidate)
+    return real_candidate == target or real_candidate.startswith(f"{target}p")
+
+
+def _parse_mountinfo_lines(lines, device_name):
+    matches = []
+    for line in lines:
+        if " - " not in line:
+            continue
+        left, right = line.rstrip("\n").split(" - ", 1)
+        left_parts = left.split()
+        right_parts = right.split()
+        if len(left_parts) < 5 or len(right_parts) < 2:
+            continue
+        mountpoint = _decode_mount_field(left_parts[4])
+        source = _decode_mount_field(right_parts[1])
+        if _device_matches(source, device_name):
+            matches.append((mountpoint, source))
+    return matches
+
+
 def disk_usage_for_device(device_name):
     if not device_name:
         return None
     mount_candidates = []
     try:
-        with open("/proc/mounts", "r", encoding="utf-8") as src:
-            for line in src:
-                parts = line.split()
-                if len(parts) < 2:
-                    continue
-                dev, mountpoint = parts[0], parts[1].replace("\040", " ")
-                if dev == f"/dev/{device_name}" or dev.startswith(f"/dev/{device_name}p"):
-                    mount_candidates.append(mountpoint)
+        with open("/proc/self/mountinfo", "r", encoding="utf-8") as src:
+            mount_candidates = _parse_mountinfo_lines(src, device_name)
     except OSError:
-        return None
+        mount_candidates = []
+
+    if not mount_candidates:
+        try:
+            with open("/proc/mounts", "r", encoding="utf-8") as src:
+                for line in src:
+                    parts = line.split()
+                    if len(parts) < 2:
+                        continue
+                    dev, mountpoint = _decode_mount_field(parts[0]), _decode_mount_field(parts[1])
+                    if _device_matches(dev, device_name):
+                        mount_candidates.append((mountpoint, dev))
+        except OSError:
+            return None
+
     if not mount_candidates:
         return None
-    mountpoint = sorted(mount_candidates, key=len)[0]
+    mountpoint, source = sorted(mount_candidates, key=lambda item: len(item[0]), reverse=True)[0]
     try:
         usage = shutil.disk_usage(mountpoint)
-        return {"mountpoint": mountpoint, "total": usage.total, "used": usage.used, "free": usage.free}
+        return {"mountpoint": mountpoint, "source": source, "total": usage.total, "used": usage.used, "free": usage.free}
     except OSError:
         return None
 
@@ -418,6 +462,33 @@ def read_cache_device_capacity(cache_set_path):
     return sum(known) if known else None
 
 
+def read_block_device_stat(device_name):
+    raw = read(f"/sys/block/{device_name}/stat") if device_name else None
+    if not raw:
+        return None
+    parts = raw.split()
+    if len(parts) < 7:
+        return None
+    try:
+        return {"read_sectors": int(parts[2]), "write_sectors": int(parts[6])}
+    except ValueError:
+        return None
+
+
+def calculate_device_rates(prev_sample, current_stat, now_ts):
+    if not prev_sample or not current_stat:
+        return None, None
+    prev_stat, prev_ts = prev_sample
+    elapsed = now_ts - prev_ts
+    if elapsed <= 0:
+        return None, None
+    read_delta = current_stat["read_sectors"] - prev_stat.get("read_sectors", 0)
+    write_delta = current_stat["write_sectors"] - prev_stat.get("write_sectors", 0)
+    read_rate = read_delta * 512 / elapsed if read_delta >= 0 else None
+    write_rate = write_delta * 512 / elapsed if write_delta >= 0 else None
+    return read_rate, write_rate
+
+
 def read_bcache_details(device_name, bcache_path):
     cache_set_path = discover_cache_set_path(bcache_path)
     dirty_bytes = dirty_val()
@@ -447,6 +518,7 @@ def read_bcache_details(device_name, bcache_path):
         "writeback_rate_bytes": writeback_rate_bytes,
         "writeback_running": read(f"{bcache_path}/writeback_running") if bcache_path else None,
         "cache_set_path": cache_set_path,
+        "device_stat": read_block_device_stat(device_name),
     }
 
 
@@ -468,10 +540,16 @@ def format_cache_mode(cache_mode_raw):
     return token
 
 
-def format_delta_pct(current, baseline):
-    if baseline <= 0:
+def format_delta_pct(current, baseline, min_baseline=0.0):
+    if baseline <= min_baseline:
         return "n/a"
     return f"{pct_change(current, baseline):+.0f}%"
+
+
+def format_delta_pct_for_display(current, baseline):
+    if current <= 0 and baseline <= MIN_DELTA_BASELINE_PS:
+        return "n/a"
+    return format_delta_pct(current, baseline, MIN_DELTA_BASELINE_PS)
 
 def list_bcache_devices():
     candidates = []
@@ -637,6 +715,23 @@ def _parse_stats_output(stdout, selected=None):
     return entries
 
 
+
+def calculate_docker_io_rates(prev_sample, read_bytes, write_bytes, now_ts):
+    current_totals = ((read_bytes or 0, write_bytes or 0), now_ts)
+    if not prev_sample:
+        return None, None, current_totals
+    prev_totals, prev_ts = prev_sample
+    if isinstance(prev_totals, tuple):
+        prev_read, prev_write = prev_totals
+    else:
+        prev_read, prev_write = prev_totals, 0
+    elapsed = now_ts - prev_ts
+    read_delta = (read_bytes or 0) - prev_read
+    write_delta = (write_bytes or 0) - prev_write
+    read_rate = read_delta / elapsed if elapsed > 0 and read_delta >= 0 else None
+    write_rate = write_delta / elapsed if elapsed > 0 and write_delta >= 0 else None
+    return read_rate, write_rate, current_totals
+
 def list_container_stats(selected_containers):
     selected = sorted({_normalize_container_name(name) for name in (selected_containers or []) if _normalize_container_name(name)})
     format_args = ["--no-stream", "--format", "{{.Name}}|{{.CPUPerc}}|{{.MemPerc}}|{{.MemUsage}}|{{.BlockIO}}"]
@@ -706,6 +801,9 @@ class AppState:
     docker_state: str = "UNAVAILABLE"
     docker_last: float = 0.0
     docker_io_prev: dict = field(default_factory=dict)
+    docker_io_rates: dict = field(default_factory=dict)
+    backing_io_prev: tuple = None
+    backing_write_rate_bytes: float = None
     available_devices: list = field(default_factory=list)
     device_name: str = ""
     device_path: str = ""
@@ -718,6 +816,7 @@ class AppState:
     pm: int = 0
     pt: float = 0.0
     graph_scale: float = 1.0
+    eff_history: deque = field(default_factory=lambda: deque(maxlen=HISTORY))
 
 
 def refresh_device_selection(state):
@@ -748,12 +847,14 @@ def handle_keypress(key, state):
 
 
 def status_from_metrics(eff, hps, mps, miss_window):
+    total_ps = hps + mps
     ratio = (mps / hps) if hps > 0 else (float("inf") if mps > 0 else 0.0)
 
+    window_vals = list(miss_window)
+    recent_miss_events = sum(window_vals[-6:]) if window_vals else 0
     trend = 1.0
-    if len(miss_window) >= 6:
-        half = len(miss_window) // 2
-        window_vals = list(miss_window)
+    if total_ps > 0 and recent_miss_events >= MIN_HEALTH_TREND_EVENTS and len(window_vals) >= 6:
+        half = len(window_vals) // 2
         first_avg = sum(window_vals[:half]) / max(half, 1)
         second_avg = sum(window_vals[half:]) / max(len(window_vals) - half, 1)
         if first_avg <= 0:
@@ -768,35 +869,42 @@ def status_from_metrics(eff, hps, mps, miss_window):
     if eff < EFF_CRITICAL_THRESHOLD:
         status = "CRITICAL"
         color = 1
-        reasons.append(f"eff {eff:.0f}%")
+        suffix = "historical" if total_ps == 0 else ""
+        reasons.append(f"eff {eff:.0f}% {suffix}".strip())
     elif eff < EFF_WARN_THRESHOLD:
         if status != "CRITICAL":
             status = "WARN"
             color = 3
-        reasons.append(f"eff {eff:.0f}%")
+        suffix = "historical" if total_ps == 0 else ""
+        reasons.append(f"eff {eff:.0f}% {suffix}".strip())
 
-    if ratio >= MISS_HIT_RATIO_CRITICAL:
-        status = "CRITICAL"
-        color = 1
-        reasons.append(f"miss/hit {ratio:.2f}")
-    elif ratio >= MISS_HIT_RATIO_WARN and status == "OK":
-        status = "WARN"
-        color = 3
-        reasons.append(f"miss/hit {ratio:.2f}")
+    if total_ps > 0:
+        if ratio >= MISS_HIT_RATIO_CRITICAL:
+            status = "CRITICAL"
+            color = 1
+            reasons.append(f"miss/hit {ratio:.2f}")
+        elif ratio >= MISS_HIT_RATIO_WARN and status == "OK":
+            status = "WARN"
+            color = 3
+            reasons.append(f"miss/hit {ratio:.2f}")
 
-    if trend >= MISS_TREND_CRITICAL:
-        status = "CRITICAL"
-        color = 1
-        reasons.append("miss trend ↑")
-    elif trend >= MISS_TREND_WARN and status == "OK":
-        status = "WARN"
-        color = 3
-        reasons.append("miss trend ↑")
+        if trend >= MISS_TREND_CRITICAL:
+            status = "CRITICAL"
+            color = 1
+            reasons.append("miss trend ↑")
+        elif trend >= MISS_TREND_WARN and status == "OK":
+            status = "WARN"
+            color = 3
+            reasons.append("miss trend ↑")
+    elif not reasons:
+        reasons.append("idle")
 
     if not reasons:
         reasons.append("stable")
 
     return status, color, ", ".join(reasons)
+
+
 def draw_area_graph(stdscr,data,y,x,w,h,color):
     if len(data)<2: return
     d=list(data)[-w:]
@@ -1043,16 +1151,16 @@ def info_lines(state):
         "LIVE HIT/s und MISS/s: Momentane Änderung der bcache-Zähler pro Sekunde. Wichtig für Lastspitzen und Live-Diagnose.",
         "GRAPH: Rote Linie = MISS/s, grüne Linie = HIT/s. Wichtig, um kurze Peaks und Trends schneller zu sehen als in Einzelzahlen.",
         "H/M current/avg/peak: aktueller Wert, Fenstermittel, Spitzenwert. Wichtig, um Livewerte mit der jüngsten Historie zu vergleichen.",
-        "MIX: Anteil der aktuellen bcache-Ereignisse; M ist Miss-Anteil, H ist Hit-Anteil. Bei 0/s Gesamtlast ist MIX nur rechnerisch 0%/100% und nicht aussagekräftig.",
-        "DELTA: Vergleich aktueller Werte mit dem Fensterdurchschnitt. Wenn der Durchschnitt 0 ist, wird n/a angezeigt, weil Prozentwerte sonst irreführend wären.",
+        "MIX: Anteil der aktuellen bcache-Ereignisse; M ist Miss-Anteil, H ist Hit-Anteil. Bei 0/s Gesamtlast zeigt das Tool MIX idle, weil Prozentwerte nicht aussagekräftig wären.",
+        "DELTA: Vergleich aktueller Werte mit dem Fensterdurchschnitt. Bei Idle oder sehr kleiner Baseline wird n/a angezeigt, weil Prozentwerte wie -100% sonst irreführend wären.",
         "HEALTH: Ampel aus EFF, MISS/HIT und Miss-Trend. Wichtig als schnelle Warnung; sie ersetzt keine Ursachenanalyse.",
-        "CACHE NUMBERS: Totale Hits/Misses, Effizienz, Peak-Raten und Zusatzinfos wie Cache-Modus, Cache-Größe, freier Writeback-Anteil, Dirty-Daten und Writeback-Rate.",
-        "CONTAINERS CPU/RAM/DISK: Docker-Statistiken. DISK zeigt Read- und Write-Rate aus Docker BlockIO-Deltas seit der letzten Aktualisierung.",
+        "CACHE NUMBERS: Totale Hits/Misses, Effizienz, Peak-Raten, Cache-Modus, Cache-Größe, Writeback-Zielrate, echter HDD-Schreibdurchsatz und freier Writeback-Anteil.",
+        "CONTAINERS CPU/RAM/DISK: Docker-Statistiken. DISK zeigt Read- und Write-Rate aus Docker BlockIO-Deltas und hält die letzte Rate bis zum nächsten Docker-Sample stabil.",
         "",
         "Zusatzinfos und Grenzen:",
-        "HDD/Backing-Größe: Wird aus /sys/block/<device>/size berechnet. Genutzter/freier Dateisystemplatz wird nur angezeigt, wenn /dev/<device> als Mount in /proc/mounts gefunden wird.",
+        "HDD/Backing-Größe: Wird aus /sys/block/<device>/size berechnet. Genutzter/freier Dateisystemplatz wird über /proc/self/mountinfo und /proc/mounts gesucht, inklusive aufgelöster /dev/disk/by-* Pfade.",
         "SSD/Cache-Größe: Wird, soweit sysfs es hergibt, aus bcache cache*/bucket_size * nbuckets berechnet. Freier Writeback-Anteil nutzt cache_available_percent.",
-        "Cache->HDD Schreibgeschwindigkeit: writeback_rate ist die von bcache gemeldete/gedrosselte Hintergrund-Writeback-Rate in Sektoren/s, hier in Bytes/s dargestellt; sie ist nicht immer identisch mit physischer HDD-IO.",
+        "Cache->HDD Schreibgeschwindigkeit: WB target ist die von bcache gemeldete/gedrosselte Hintergrund-Writeback-Rate. HDD write ist zusätzlich aus /sys/block/<device>/stat berechnet und näher an der tatsächlichen physischen Schreibrate.",
         "cache_mode: writethrough/writeback/writearound/none bestimmt, wie bcache Reads/Writes behandelt. Besonders writeback kann Dirty-Daten puffern.",
         "writeback_percent/running: Zielanteil Dirty-Daten und ob Hintergrund-Writeback aktiv ist. Wichtig, damit Dirty-Daten nicht dauerhaft liegen bleiben.",
         "",
@@ -1154,7 +1262,14 @@ def draw_main(stdscr):
         state.hits.append(hps); state.miss.append(mps); state.miss_trend.append(mps)
 
         eff=h0/(h0+m0)*100 if (h0+m0) else 0
+        eff_baseline = (sum(state.eff_history) / len(state.eff_history)) if state.eff_history else None
+        state.eff_history.append(eff)
         details = read_bcache_details(state.device_name, state.device_path)
+        backing_read_rate, backing_write_rate = calculate_device_rates(state.backing_io_prev, details.get("device_stat"), now)
+        if details.get("device_stat"):
+            state.backing_io_prev = (details["device_stat"], now)
+        if backing_write_rate is not None:
+            state.backing_write_rate_bytes = backing_write_rate
         dirty_bytes = details["dirty_bytes"]
         dirty_display=format_dirty_value(dirty_bytes)
 
@@ -1205,8 +1320,10 @@ def draw_main(stdscr):
         else:
             graph_legend = f"GRAPH | red=MISS/s | green=HIT/s | Scale {maxv}/s | ◆ latest non-zero | • history"
         safe_addstr(stdscr, graph_y - 1, graph_x, graph_legend, 6)
+        info_y = graph_y + graph_h + 1
         point_help = "Points: 1 point = 1s | zero values stay on the axis to avoid fake traffic"
-        safe_addstr(stdscr, graph_y + graph_h + 1, graph_x, point_help, 6)
+        safe_addstr(stdscr, info_y, graph_x, point_help, 6)
+        info_y += 1
 
         avg_h = (sum(state.hits) / len(state.hits)) if state.hits else 0
         avg_m = (sum(state.miss) / len(state.miss)) if state.miss else 0
@@ -1218,26 +1335,31 @@ def draw_main(stdscr):
         m_part = f"M {mps:>4}/{avg_m:>4.0f}/{max_m:>4}"
         hit_share = (hps / (hps + mps) * 100.0) if (hps + mps) > 0 else 0.0
         mix_part = f"MIX M:{miss_share:>5.1f}% H:{hit_share:>5.1f}%" if (hps + mps) > 0 else "MIX idle"
-        delta_part = f"Δ M:{format_delta_pct(mps, avg_m)} H:{format_delta_pct(hps, avg_h)}"
-        safe_addstr(stdscr, graph_y + graph_h + 2, graph_x, h_part, 2)
+        delta_part = f"Δ M:{format_delta_pct_for_display(mps, avg_m)} H:{format_delta_pct_for_display(hps, avg_h)}"
+        safe_addstr(stdscr, info_y, graph_x, h_part, 2)
         x_off = graph_x + len(h_part)
-        safe_addstr(stdscr, graph_y + graph_h + 2, x_off, " | ", 6)
+        safe_addstr(stdscr, info_y, x_off, " | ", 6)
         x_off += 3
-        safe_addstr(stdscr, graph_y + graph_h + 2, x_off, m_part, 1)
+        safe_addstr(stdscr, info_y, x_off, m_part, 1)
         x_off += len(m_part)
-        safe_addstr(stdscr, graph_y + graph_h + 2, x_off, f" | {mix_part} | {delta_part}", 6)
-        safe_addstr(stdscr, graph_y + graph_h + 3, graph_x, "H/M format: current/s / average/s / peak/s", 6)
+        safe_addstr(stdscr, info_y, x_off, f" | {mix_part} | {delta_part}", 6)
+        info_y += 1
+        safe_addstr(stdscr, info_y, graph_x, "H/M format: current/s / average/s / peak/s", 6)
+        info_y += 1
         if not tiny_mode:
-            safe_addstr(stdscr, graph_y + graph_h + 4, graph_x, f"window {min(len(state.hits), graph_w)}s (buffer {HISTORY}s)", 6)
+            safe_addstr(stdscr, info_y, graph_x, f"window {min(len(state.hits), graph_w)}s (buffer {HISTORY}s)", 6)
+            info_y += 1
 
         # -------- STATUS --------
         status,color,reason=status_from_metrics(eff,hps,mps,state.miss_trend)
-        safe_addstr(stdscr,4+graph_h+1,1,f"HEALTH | PRIMARY ALERT: {status} ({reason})",color)
-        eff_arrow = trend_arrow(eff, avg_h and (h0/(h0+m0)*100 if (h0+m0) else eff))
+        safe_addstr(stdscr, info_y, 1, f"HEALTH | PRIMARY ALERT: {status} ({reason})", color)
+        info_y += 1
+        eff_arrow = trend_arrow(eff, eff_baseline) if eff_baseline is not None else "→"
         ratio_arrow = trend_arrow(mps, avg_m)
         if not tiny_mode:
             health_text = f"HEALTH | EFF {eff:.1f}%{eff_arrow} crit<{EFF_CRITICAL_THRESHOLD:.0f} | MISS/HIT {ratio_text}{ratio_arrow} crit≥{MISS_HIT_RATIO_CRITICAL:.2f}"
-            safe_addstr(stdscr,4+graph_h+2,1,health_text, color)
+            safe_addstr(stdscr, info_y, 1, health_text, color)
+            info_y += 1
         if len(state.hits) >= 10 and len(state.miss) >= 10:
             short_h = sum(list(state.hits)[-10:]) / 10
             short_m = sum(list(state.miss)[-10:]) / 10
@@ -1245,7 +1367,8 @@ def draw_main(stdscr):
             short_h = avg_h
             short_m = avg_m
         if not compact_mode:
-            safe_addstr(stdscr,graph_y+graph_h+4,1,f"10s AVG -> H:{short_h:.0f}/s  M:{short_m:.0f}/s  ΔMISS:{format_delta_pct(short_m, avg_m)} vs window",4)
+            safe_addstr(stdscr, info_y, 1, f"10s AVG -> H:{short_h:.0f}/s  M:{short_m:.0f}/s  ΔMISS:{format_delta_pct_for_display(short_m, avg_m)} vs window", 4)
+            info_y += 1
 
         if compact_mode:
             safe_addstr(stdscr, graph_y + graph_h + 4, 1, "COMPACT MODE | Core metrics prioritized", 3)
@@ -1262,7 +1385,7 @@ def draw_main(stdscr):
             continue
 
         # -------- CONTAINERS --------
-        y = graph_y+graph_h+5
+        y = max(info_y + 1, graph_y + graph_h + 5)
         stats_right_x = 32 if maxx >= 100 else max(1, maxx // 2)
         safe_addstr(stdscr,y,1,"CACHE NUMBERS",4)
         y += 1
@@ -1276,7 +1399,12 @@ def draw_main(stdscr):
         safe_addstr(stdscr,y,stats_right_x,f"Peak Miss/s:  {max_m:>6}")
         y += 1
         safe_addstr(stdscr,y,1,f"Mode:         {format_cache_mode(details['cache_mode'])}")
-        safe_addstr(stdscr,y,stats_right_x,f"WB rate:      {format_io_rate(details['writeback_rate_bytes'])}")
+        safe_addstr(stdscr,y,stats_right_x,f"WB target:    {format_io_rate(details['writeback_rate_bytes'])}")
+        y += 1
+        safe_addstr(stdscr,y,1,f"WB percent:   {details['writeback_percent'] or 'N/A'}")
+        safe_addstr(stdscr,y,stats_right_x,f"HDD write:    {format_io_rate(state.backing_write_rate_bytes)}")
+        y += 1
+        safe_addstr(stdscr,y,1,f"WB running:   {details['writeback_running'] or 'N/A'}")
         y += 1
         safe_addstr(stdscr,y,1,f"SSD cache:    {format_bytes(details['cache_capacity'])}")
         safe_addstr(stdscr,y,stats_right_x,f"Avail WB:     {format_pct(details['cache_available_percent'])} {format_bytes(details['cache_available_bytes'])}")
@@ -1290,7 +1418,8 @@ def draw_main(stdscr):
         safe_addstr(stdscr,y,1,"CONTAINERS",4)
         y+=1
 
-        if now - state.docker_last >= DOCKER_REFRESH_SECONDS:
+        docker_refreshed = now - state.docker_last >= DOCKER_REFRESH_SECONDS
+        if docker_refreshed:
             state.docker_cache, state.docker_state = list_container_stats(state.selected_containers)
             state.docker_last = now
 
@@ -1344,24 +1473,13 @@ def draw_main(stdscr):
             mem_text = format_dirty_value(mem_bytes) if mem_bytes is not None else "N/A"
             read_bytes, write_bytes = parse_docker_block_io_pair(block_io_raw)
 
-            read_rate = None
-            write_rate = None
-            if read_bytes is not None or write_bytes is not None:
-                current_io_totals[name] = ((read_bytes or 0, write_bytes or 0), now_ts)
-                prev_sample = state.docker_io_prev.get(name)
-                if prev_sample:
-                    prev_totals, prev_ts = prev_sample
-                    if isinstance(prev_totals, tuple):
-                        prev_read, prev_write = prev_totals
-                    else:
-                        prev_read, prev_write = prev_totals, 0
-                    elapsed = now_ts - prev_ts
-                    read_delta = (read_bytes or 0) - prev_read
-                    write_delta = (write_bytes or 0) - prev_write
-                    if elapsed > 0 and read_delta >= 0:
-                        read_rate = read_delta / elapsed
-                    if elapsed > 0 and write_delta >= 0:
-                        write_rate = write_delta / elapsed
+            read_rate, write_rate = state.docker_io_rates.get(name, (None, None))
+            if docker_refreshed and (read_bytes is not None or write_bytes is not None):
+                read_rate, write_rate, totals_sample = calculate_docker_io_rates(
+                    state.docker_io_prev.get(name), read_bytes, write_bytes, now_ts
+                )
+                current_io_totals[name] = totals_sample
+                state.docker_io_rates[name] = (read_rate, write_rate)
             if io_col_w >= 26:
                 io_text = f"R {format_io_rate(read_rate)} W {format_io_rate(write_rate)}"
             else:
@@ -1381,7 +1499,8 @@ def draw_main(stdscr):
             safe_addstr(stdscr,y,mem_x + 11 + len(bar_mem),bar_mem_empty,6)
             safe_addstr(stdscr,y,io_x,f"D {io_text}",6)
             y+=1
-        state.docker_io_prev = current_io_totals
+        if docker_refreshed:
+            state.docker_io_prev = current_io_totals
 
         if state.update_notice: safe_addstr(stdscr,maxy-2,1,state.update_notice,3)
         if state.config_notice: safe_addstr(stdscr,maxy-2,1,state.config_notice,3)

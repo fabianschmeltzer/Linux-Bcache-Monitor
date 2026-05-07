@@ -48,7 +48,7 @@ curl -fsSL https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monit
 
 ## ℹ️ Info, Credits und rechtliche Hinweise
 
-- **Version:** 0.5.10
+- **Version:** 0.5.11
 - **Credits:** by Fabian Schmeltzer
 - **KI-Hinweis:** Dieses Programm wurde mit KI-Unterstützung geschrieben und kann Fehler enthalten. Bitte prüfe kritische Ausgaben und verwende das Tool auf eigene Verantwortung.
 - **Bugreports:** Bitte Fehler und Verbesserungsvorschläge über die GitHub-Issues melden: <https://github.com/fabianschmeltzer/Linux-Bcache-Monitor/issues>
@@ -67,7 +67,20 @@ curl -fsSL https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monit
 - **HEALTH:** Ampelbewertung aus Effizienz, Miss/Hit-Verhältnis und Miss-Trend.
 - **SSD cache / Avail WB:** Cache-Größe und potentiell für Writeback verfügbarer Cache-Anteil, soweit über sysfs auslesbar.
 - **HDD/backing:** Größe des bcache-Blockdevices und, falls gemountet, genutzter/freier Dateisystemplatz.
-- **WB rate:** Von bcache gemeldete Hintergrund-Writeback-Rate (`writeback_rate`) als Bytes/s. Das ist die bcache-Drossel-/Zielrate und nicht zwingend identisch mit physischer HDD-IO.
-- **Docker DISK:** Read- und Write-Rate aus Docker `BlockIO`-Deltas seit der letzten Aktualisierung.
+- **WB target:** Von bcache gemeldete Hintergrund-Writeback-Rate (`writeback_rate`) als Bytes/s. Das ist die bcache-Drossel-/Zielrate und nicht zwingend identisch mit physischer HDD-IO.
+- **WB percent / WB running:** Zielanteil für Dirty-Daten und Status, ob bcache-Hintergrund-Writeback läuft.
+- **HDD write:** Aus `/sys/block/<device>/stat` berechnete reale Backing-Device-Schreibrate zwischen zwei Samples. Damit lässt sich besser erkennen, ob Dirty-Daten tatsächlich auf die HDD abfließen.
+- **Docker DISK:** Read- und Write-Rate aus Docker `BlockIO`-Deltas seit der letzten Docker-Aktualisierung. Die letzte berechnete Rate bleibt sichtbar, bis ein neues Docker-Sample vorliegt.
 
 Quellen zur Einordnung: Die [Linux-Kernel-Dokumentation](https://docs.kernel.org/admin-guide/bcache.html) beschreibt die bcache-sysfs-Werte wie `dirty_data`, `writeback_percent`, `writeback_rate`, `cache_available_percent`, `bucket_size` und `nbuckets`. [GitHub Docs](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/licensing-a-repository) und [Choose a License](https://choosealicense.com/no-permission/) erläutern die rechtliche Ausgangslage bei Repositories ohne Lizenz.
+
+
+## ⚖️ Rechtlicher Hinweis
+
+Dies ist keine Rechtsberatung. Das Tool wird ohne Gewährleistung bereitgestellt; Ausgaben können falsch, unvollständig oder veraltet sein. Prüfe kritische Werte vor produktiven Entscheidungen unabhängig nach. Ohne explizite Open-Source-Lizenz gelten grundsätzlich die üblichen Urheberrechte; öffentliche GitHub-Repositories dürfen im Rahmen der GitHub-Plattformbedingungen angesehen und geforkt werden, weitergehende Nutzung, Verteilung oder abgeleitete Werke benötigen jedoch eine passende Lizenz bzw. Erlaubnis.
+
+## 🙏 Credits
+
+by Fabian Schmeltzer
+
+Dieses Programm wurde mit KI-Unterstützung geschrieben und kann Fehler enthalten. Bugreports bitte über <https://github.com/fabianschmeltzer/Linux-Bcache-Monitor/issues> melden.
