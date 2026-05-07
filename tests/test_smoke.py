@@ -34,13 +34,13 @@ def test_version_metadata_is_in_sync():
     version = (repo_root / "VERSION").read_text().strip()
     readme = (repo_root / "README.md").read_text()
 
-    assert bcache_monitor.__version__ == version == "0.5.10"
+    assert bcache_monitor.__version__ == version == "0.5.11"
     assert f"**Version:** {version}" in readme
 
 
 def test_print_version_and_exit_for_cli_flag(capsys):
     assert bcache_monitor.print_version_and_exit_if_requested(["bcache-monitor", "--version"]) is True
-    assert capsys.readouterr().out.strip() == "0.5.10"
+    assert capsys.readouterr().out.strip() == "0.5.11"
 
 
 def test_info_lines_include_bugreport_and_ai_notice():
@@ -78,3 +78,47 @@ def test_draw_line_graph_does_not_draw_vertical_spike_bars_or_zero_baseline():
     assert "┃" not in drawn_text
     assert "━" not in drawn_text
     assert all(row != 2 + 6 - 1 for row, _, _, _ in screen.draws)
+
+
+def test_status_from_metrics_ignores_miss_trend_when_idle():
+    status, _color, reason = bcache_monitor.status_from_metrics(52.0, 0, 0, [0, 0, 0, 10, 10, 10])
+
+    assert status == "WARN"
+    assert "historical" in reason
+    assert "miss trend" not in reason
+
+
+def test_status_from_metrics_keeps_live_miss_only_critical():
+    status, _color, reason = bcache_monitor.status_from_metrics(90.0, 0, 5, [0, 0, 0, 5, 5, 5])
+
+    assert status == "CRITICAL"
+    assert "miss/hit" in reason
+
+
+def test_format_delta_pct_for_display_suppresses_idle_minus_100():
+    assert bcache_monitor.format_delta_pct_for_display(0, 0.5) == "n/a"
+
+
+def test_calculate_docker_io_rates_returns_read_and_write_rates():
+    prev = ((1024, 2048), 10.0)
+    read_rate, write_rate, current = bcache_monitor.calculate_docker_io_rates(prev, 3072, 6144, 12.0)
+
+    assert read_rate == 1024
+    assert write_rate == 2048
+    assert current == ((3072, 6144), 12.0)
+
+
+def test_calculate_device_rates_uses_written_sectors():
+    prev = ({"read_sectors": 10, "write_sectors": 20}, 1.0)
+    current = {"read_sectors": 14, "write_sectors": 28}
+
+    read_rate, write_rate = bcache_monitor.calculate_device_rates(prev, current, 3.0)
+
+    assert read_rate == 1024
+    assert write_rate == 2048
+
+
+def test_parse_mountinfo_lines_matches_direct_device():
+    lines = ["36 25 8:0 / /data rw,relatime - ext4 /dev/bcache0 rw\n"]
+
+    assert bcache_monitor._parse_mountinfo_lines(lines, "bcache0") == [("/data", "/dev/bcache0")]
