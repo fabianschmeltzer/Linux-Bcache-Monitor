@@ -3,7 +3,7 @@ import curses, time, subprocess, os, sys, urllib.request, glob, json, textwrap, 
 from dataclasses import dataclass, field
 from collections import deque
 
-__version__ = "0.5.12"
+__version__ = "0.6.00"
 
 # URLs can be overridden for your publish target, e.g. GitHub raw links.
 VERSION_URL = os.environ.get("BCACHE_MONITOR_VERSION_URL", "https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monitor/main/VERSION")
@@ -736,6 +736,17 @@ def list_container_stats(selected_containers):
     selected = sorted({_normalize_container_name(name) for name in (selected_containers or []) if _normalize_container_name(name)})
     format_args = ["--no-stream", "--format", "{{.Name}}|{{.CPUPerc}}|{{.MemPerc}}|{{.MemUsage}}|{{.BlockIO}}"]
 
+    selected_filter = None
+    if selected:
+        running_names, running_state = list_running_containers()
+        if running_state != "OK":
+            return [], running_state
+        running_set = {_normalize_container_name(name) for name in running_names}
+        selected = [name for name in selected if name in running_set]
+        selected_filter = set(selected)
+        if not selected:
+            return [], "NO CONTAINERS"
+
     command = ["docker", "stats", *format_args]
     if selected:
         command.extend(selected)
@@ -744,13 +755,12 @@ def list_container_stats(selected_containers):
     if not result["ok"]:
         return [], result["status"]
 
-    selected_filter = set(selected) if selected else None
     res = _parse_stats_output(result["stdout"], selected=selected_filter)
 
     if res:
         return res, "OK"
 
-    return [], ("NO CONTAINERS" if selected else "ALL (none running)")
+    return [], ("NO CONTAINERS" if selected_filter else "ALL (none running)")
 
 STATS_TOTAL_PATH = None
 
