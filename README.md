@@ -38,7 +38,7 @@ This tool helps you monitor:
 
 ## 🚀 Installation
 
-Dieses `curl` lädt die Datei in den **aktuellen Pfad** und macht sie direkt ausführbar:
+This `curl` downloads the file to the **current path** and makes it executable immediately:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monitor/main/bcache-monitor -o ./bcache-monitor && chmod +x ./bcache-monitor
@@ -46,41 +46,41 @@ curl -fsSL https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monit
 
 ---
 
-## ℹ️ Info, Credits und rechtliche Hinweise
+## ℹ️ Info, credits, and legal notes
 
-- **Version:** 0.5.11
+- **Version:** 0.5.12
 - **Credits:** by Fabian Schmeltzer
-- **KI-Hinweis:** Dieses Programm wurde mit KI-Unterstützung geschrieben und kann Fehler enthalten. Bitte prüfe kritische Ausgaben und verwende das Tool auf eigene Verantwortung.
-- **Bugreports:** Bitte Fehler und Verbesserungsvorschläge über die GitHub-Issues melden: <https://github.com/fabianschmeltzer/Linux-Bcache-Monitor/issues>
-- **Rechtlicher Hinweis:** Dies ist keine Rechtsberatung. Ohne explizite Open-Source-Lizenz gelten grundsätzlich die üblichen Urheberrechte; GitHub weist in seiner Dokumentation darauf hin, dass öffentliche Repositories ohne Lizenz zwar angesehen und innerhalb GitHub geforkt werden können, weitergehende Nutzung, Verteilung oder abgeleitete Werke aber eine passende Lizenz bzw. Erlaubnis benötigen. Für verbindliche Einschätzungen bitte juristischen Rat einholen.
+- **AI note:** This program was written with AI assistance and may contain errors. Please verify critical output and use this tool at your own risk.
+- **Bug reports:** Please submit bugs and improvement suggestions via GitHub Issues: <https://github.com/fabianschmeltzer/Linux-Bcache-Monitor/issues>
+- **Legal note:** This is not legal advice. Without an explicit open-source license, standard copyright rules generally apply; GitHub documents that public repositories without a license can be viewed and forked on GitHub, but broader use, distribution, or derivative works require an appropriate license or permission. For binding guidance, consult legal counsel.
 
-## 📖 Was bedeuten die Werte?
+## 📖 What do the values mean?
 
-- **EFF:** Cache-Effizienz aus `Total Hits / (Total Hits + Total Misses)`. Niedrige Werte zeigen, dass viele Zugriffe nicht aus dem SSD-Cache bedient werden.
-- **DIRTY:** Datenmenge, die im Cache liegt und noch auf die HDD bzw. das Backing Device geschrieben werden muss. Besonders im Writeback-Modus wichtig.
-- **MISS/HIT:** Verhältnis aktueller Misses pro Sekunde zu Hits pro Sekunde. Werte ab etwa `1.0` bedeuten, dass mindestens so viele Anfragen am Cache vorbeigehen wie aus dem Cache bedient werden.
-- **LIVE HIT/s und MISS/s:** Live-Änderungsrate der bcache-Zähler pro Sekunde.
-- **GRAPH:** Rot zeigt `MISS/s`, grün zeigt `HIT/s`; `◆` markiert den neuesten Punkt, `•` ältere Punkte.
-- **H/M current/avg/peak:** Aktueller Wert, Fensterdurchschnitt und Spitzenwert.
-- **MIX:** Prozentualer Anteil der aktuellen bcache-Ereignisse. `M` steht für Miss-Anteil, `H` für Hit-Anteil. Bei keiner Last zeigt das Tool `MIX idle`, weil Prozentwerte sonst irreführend wären.
-- **Δ / DELTA:** Vergleich des aktuellen Werts mit dem Fensterdurchschnitt. Ist der Durchschnitt `0`, wird `n/a` angezeigt.
-- **HEALTH:** Ampelbewertung aus Effizienz, Miss/Hit-Verhältnis und Miss-Trend.
-- **SSD cache / Avail WB:** Cache-Größe und potentiell für Writeback verfügbarer Cache-Anteil, soweit über sysfs auslesbar.
-- **HDD/backing:** Größe des bcache-Blockdevices und, falls gemountet, genutzter/freier Dateisystemplatz.
-- **WB target:** Von bcache gemeldete Hintergrund-Writeback-Rate (`writeback_rate`) als Bytes/s. Das ist die bcache-Drossel-/Zielrate und nicht zwingend identisch mit physischer HDD-IO.
-- **WB percent / WB running:** Zielanteil für Dirty-Daten und Status, ob bcache-Hintergrund-Writeback läuft.
-- **HDD write:** Aus `/sys/block/<device>/stat` berechnete reale Backing-Device-Schreibrate zwischen zwei Samples. Damit lässt sich besser erkennen, ob Dirty-Daten tatsächlich auf die HDD abfließen.
-- **Docker DISK:** Read- und Write-Rate aus Docker `BlockIO`-Deltas seit der letzten Docker-Aktualisierung. Die letzte berechnete Rate bleibt sichtbar, bis ein neues Docker-Sample vorliegt.
+- **EFF:** Cache efficiency from `Total Hits / (Total Hits + Total Misses)`. Low values indicate many accesses are not served by SSD cache.
+- **DIRTY:** Amount of data in cache that still needs to be written to the HDD/backing device. Especially important in writeback mode.
+- **MISS/HIT:** Ratio of current misses per second to hits per second. Values around `1.0` or higher mean at least as many requests bypass cache as are served by it.
+- **LIVE HIT/s and MISS/s:** Live per-second change rate of bcache counters.
+- **GRAPH:** Red shows `MISS/s`, green shows `HIT/s`; `◆` marks the newest point, `•` older points.
+- **H/M current/avg/peak:** Current value, window average, and peak value.
+- **MIX:** Percentage share of current bcache events. `M` is miss share, `H` is hit share. With no load, the tool shows `MIX idle` because percentages would be misleading.
+- **Δ / DELTA:** Comparison of current value with window average. If average is `0`, `n/a` is shown.
+- **HEALTH:** Traffic-light assessment from efficiency, miss/hit ratio, and miss trend.
+- **SSD cache / Avail WB:** Cache size and potentially available cache share for writeback, when readable from sysfs.
+- **HDD/backing:** Size of the bcache block device and, if mounted, used/free filesystem space.
+- **WB target:** Background writeback rate (`writeback_rate`) reported by bcache in bytes/s. This is bcache's throttle/target rate and not necessarily identical to physical HDD I/O.
+- **WB percent / WB running:** Target share for dirty data and status indicating whether bcache background writeback is running.
+- **HDD write:** Real backing-device write rate calculated from `/sys/block/<device>/stat` between two samples. Helps show whether dirty data is actually draining to HDD.
+- **Docker DISK:** Read and write rates from Docker `BlockIO` deltas since the last Docker refresh. The last calculated rate remains visible until a new Docker sample is available.
 
-Quellen zur Einordnung: Die [Linux-Kernel-Dokumentation](https://docs.kernel.org/admin-guide/bcache.html) beschreibt die bcache-sysfs-Werte wie `dirty_data`, `writeback_percent`, `writeback_rate`, `cache_available_percent`, `bucket_size` und `nbuckets`. [GitHub Docs](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/licensing-a-repository) und [Choose a License](https://choosealicense.com/no-permission/) erläutern die rechtliche Ausgangslage bei Repositories ohne Lizenz.
+Reference sources: The [Linux kernel documentation](https://docs.kernel.org/admin-guide/bcache.html) describes bcache sysfs values such as `dirty_data`, `writeback_percent`, `writeback_rate`, `cache_available_percent`, `bucket_size`, and `nbuckets`. [GitHub Docs](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/licensing-a-repository) and [Choose a License](https://choosealicense.com/no-permission/) explain the legal baseline for repositories without a license.
 
 
-## ⚖️ Rechtlicher Hinweis
+## ⚖️ Legal note
 
-Dies ist keine Rechtsberatung. Das Tool wird ohne Gewährleistung bereitgestellt; Ausgaben können falsch, unvollständig oder veraltet sein. Prüfe kritische Werte vor produktiven Entscheidungen unabhängig nach. Ohne explizite Open-Source-Lizenz gelten grundsätzlich die üblichen Urheberrechte; öffentliche GitHub-Repositories dürfen im Rahmen der GitHub-Plattformbedingungen angesehen und geforkt werden, weitergehende Nutzung, Verteilung oder abgeleitete Werke benötigen jedoch eine passende Lizenz bzw. Erlaubnis.
+This is not legal advice. The tool is provided without warranty; output may be incorrect, incomplete, or outdated. Independently verify critical values before production decisions. Without an explicit open-source license, standard copyright rules generally apply; public GitHub repositories may be viewed and forked under GitHub platform terms, but broader use, distribution, or derivative works require an appropriate license or permission.
 
 ## 🙏 Credits
 
 by Fabian Schmeltzer
 
-Dieses Programm wurde mit KI-Unterstützung geschrieben und kann Fehler enthalten. Bugreports bitte über <https://github.com/fabianschmeltzer/Linux-Bcache-Monitor/issues> melden.
+This program was written with AI assistance and may contain errors. Please report bugs at <https://github.com/fabianschmeltzer/Linux-Bcache-Monitor/issues>.
