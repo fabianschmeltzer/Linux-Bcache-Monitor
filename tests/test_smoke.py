@@ -45,7 +45,7 @@ def test_print_version_and_exit_for_cli_flag(capsys):
 
 def test_info_lines_include_bugreport_and_ai_notice():
     lines = "\n".join(bcache_monitor.info_lines(None))
-    assert "KI-Unterstützung" in lines
+    assert "AI assistance" in lines
     assert "Linux-Bcache-Monitor/issues" in lines
 
 

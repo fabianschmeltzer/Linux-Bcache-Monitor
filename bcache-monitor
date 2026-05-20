@@ -125,9 +125,9 @@ def set_update_fail_count(value):
 def mark_update_failure(reason):
     fail_count = get_update_fail_count() + 1
     set_update_fail_count(fail_count)
-    print_update_event(f"Update fehlgeschlagen ({fail_count}/{MAX_UPDATE_FAILURES}): {reason}")
+    print_update_event(f"Update failed ({fail_count}/{MAX_UPDATE_FAILURES}): {reason}")
     if fail_count >= MAX_UPDATE_FAILURES:
-        print_update_event("Update-Strategie gesperrt: 3 Fehlversuche erreicht, starte installierte Version ohne Update")
+        print_update_event("Update strategy locked: 3 failed attempts reached, starting installed version without update")
 
 
 def reset_update_fail_count():
@@ -137,37 +137,37 @@ def reset_update_fail_count():
 def self_update_if_needed():
     fail_count = get_update_fail_count()
     if fail_count >= MAX_UPDATE_FAILURES:
-        print_update_event("Update übersprungen: Fehlversuch-Limit erreicht")
+        print_update_event("Update skipped: failure limit reached")
         return False
 
     recently_updated_to = normalize_version_string(os.environ.get("BCACHE_MONITOR_UPDATED_TO", ""))
     if recently_updated_to:
         if parse_version(recently_updated_to) >= parse_version(__version__):
             print_update_event(
-                f"Update-Check übersprungen nach Neustart (lokal {__version__}, zuletzt aktualisiert auf {recently_updated_to})"
+                f"Update check skipped after restart (lokal {__version__}, last updated to {recently_updated_to})"
             )
             return False
 
     remote_version_raw = read_remote_text(VERSION_URL)
     remote_version = normalize_version_string(remote_version_raw)
     if not is_valid_version_string(remote_version):
-        mark_update_failure(f"ungültige Remote-Version '{remote_version_raw}'")
+        mark_update_failure(f"invalid remote version '{remote_version_raw}'")
         return False
 
     if parse_version(remote_version) <= parse_version(__version__):
         reset_update_fail_count()
         return False
 
-    print_update_event(f"Update verfügbar: {__version__} -> {remote_version}")
+    print_update_event(f"Update available: {__version__} -> {remote_version}")
 
     script_bytes = read_remote_bytes(SCRIPT_URL)
     if not script_bytes:
-        mark_update_failure("Script konnte nicht geladen werden")
+        mark_update_failure("Could not download script")
         return False
 
     script_content = script_bytes.decode("utf-8", errors="replace")
     if not script_content.startswith("#!/usr/bin/env python3"):
-        mark_update_failure("ungültiger Script-Header")
+        mark_update_failure("invalid script header")
         return False
 
     downloaded_version = ""
@@ -178,15 +178,15 @@ def self_update_if_needed():
             downloaded_version = normalize_version_string(rhs.strip().strip('"\''))
             break
     if not is_valid_version_string(downloaded_version):
-        mark_update_failure("Script enthält keine gültige __version__")
+        mark_update_failure("Script does not contain a valid __version__")
         return False
     if parse_version(downloaded_version) != parse_version(remote_version):
-        mark_update_failure(f"Versionskonflikt Script={downloaded_version} Remote={remote_version}")
+        mark_update_failure(f"Version mismatch Script={downloaded_version} Remote={remote_version}")
         return False
 
     script_size = len(script_bytes)
     if script_size < MIN_SCRIPT_SIZE_BYTES or script_size > MAX_SCRIPT_SIZE_BYTES:
-        mark_update_failure("ungültige Scriptgröße")
+        mark_update_failure("invalid script size")
         return False
 
     script_path = os.path.realpath(__file__)
@@ -206,7 +206,7 @@ def self_update_if_needed():
 
         os.environ["BCACHE_MONITOR_UPDATED_FROM"] = __version__
         os.environ["BCACHE_MONITOR_UPDATED_TO"] = remote_version
-        print_update_event(f"Aktualisiere auf {remote_version} und starte neu...")
+        print_update_event(f"Updating to {remote_version} and restarting...")
         time.sleep(1)
         os.execv(sys.executable, [sys.executable, script_path] + sys.argv[1:])
     except Exception as exc:
@@ -572,7 +572,7 @@ def resolve_bcache_device(config_device=""):
             "path": None,
             "source": "none",
             "devices": devices,
-            "warning": "Kein bcache-Gerät gefunden (erwartet: /sys/block/*/bcache).",
+            "warning": "No bcache device found (expected: /sys/block/*/bcache).",
         }
 
     env_device = os.environ.get("BCACHE_MONITOR_DEVICE", "").strip()
@@ -587,14 +587,14 @@ def resolve_bcache_device(config_device=""):
             "path": device_map[first_device],
             "source": "auto",
             "devices": devices,
-            "warning": f"Gespeichertes Device '{config_device}' nicht gefunden; Auto-Fallback aktiv.",
+            "warning": f"Saved device '{config_device}' not found; automatic fallback enabled.",
         }
 
     if env_device and env_device in device_map:
         return {"device": env_device, "path": device_map[env_device], "source": "env", "devices": devices, "warning": ""}
 
     first_device = devices[0]
-    warning = f"Env-Device '{env_device}' nicht gefunden; Auto-Fallback aktiv." if env_device else ""
+    warning = f"Env device '{env_device}' not found; automatic fallback enabled." if env_device else ""
     return {"device": first_device, "path": device_map[first_device], "source": "auto", "devices": devices, "warning": warning}
 
 
@@ -638,13 +638,13 @@ def load_config():
     except FileNotFoundError:
         cfg = default_config()
         ok, msg = save_config(cfg)
-        return cfg, ("Config nicht gefunden; Defaults erstellt." if ok else f"Config fehlt ({msg})")
+        return cfg, ("Config not found; defaults created." if ok else f"Config missing ({msg})")
     except PermissionError:
-        return default_config(), "Config nicht lesbar (Berechtigungen)."
+        return default_config(), "Config not readable (permissions)."
     except json.JSONDecodeError:
-        return default_config(), "Config defekt (JSON). Defaults genutzt."
+        return default_config(), "Config is invalid (JSON). Using defaults."
     except OSError as exc:
-        return default_config(), f"Config-Lesen fehlgeschlagen: {exc}"
+        return default_config(), f"Config read failed: {exc}"
 
 
 def save_config(config):
@@ -661,7 +661,7 @@ def save_config(config):
         os.replace(temp_path, CONFIG_PATH)
         return True, ""
     except PermissionError:
-        return False, "Keine Schreibberechtigung für Config."
+        return False, "No write permission for config."
     except OSError as exc:
         return False, str(exc)
     finally:
@@ -1029,13 +1029,13 @@ def draw_settings(stdscr, state):
 
         small_settings = my < 20 or mx < 70
         header_lines = ["SETTINGS"]
-        nav_text = "↑↓ Nav | Tab Bereich | Space Auswahl | Enter Speichern | Esc Zurück"
+        nav_text = "↑↓ Navigate | Tab section | Space select | Enter save | Esc back"
         if small_settings:
-            nav_text = "↑↓ scroll | Tab wechseln | Space wählen | Enter speichern | Esc zurück"
+            nav_text = "↑↓ scroll | Tab switch | Space select | Enter save | Esc back"
         header_lines += textwrap.wrap(nav_text, width=inner_w)[:2]
         header_lines += textwrap.wrap(f"docker ps: {ps_state}", width=inner_w)[:1]
         if not small_settings:
-            header_lines += textwrap.wrap("Leere Auswahl = ALLE Container anzeigen", width=inner_w)[:1]
+            header_lines += textwrap.wrap("Empty selection = show ALL containers", width=inner_w)[:1]
 
         cur_y = box_y + 1
         for i, line in enumerate(header_lines):
@@ -1061,7 +1061,7 @@ def draw_settings(stdscr, state):
         if container_label_y <= bottom_limit:
             label = "Container (Multi-Select):"
             if small_settings and mode == "device":
-                label = "Container (Tab zum Wechseln)"
+                label = "Container (Tab to switch)"
             safe_addstr(stdscr, container_label_y, inner_x, label[:inner_w], 4 if mode == "containers" else 0)
         container_start_y = container_label_y + 1
 
@@ -1082,7 +1082,7 @@ def draw_settings(stdscr, state):
                 prefix = ">" if mode == "device" and abs_i == dev_idx else " "
                 safe_addstr(stdscr, y, inner_x, f"{prefix} {marker} {name}"[:inner_w], 2 if mode == "device" and abs_i == dev_idx else 0)
         elif cur_y <= bottom_limit:
-            safe_addstr(stdscr, cur_y, inner_x, "Keine bcache-Devices gefunden."[:inner_w], 1)
+            safe_addstr(stdscr, cur_y, inner_x, "No bcache devices found."[:inner_w], 1)
 
         if small_settings and mode == "device" and device_choices:
             hint = f"{dev_idx+1}/{len(device_choices)}"
@@ -1105,7 +1105,7 @@ def draw_settings(stdscr, state):
                 prefix = ">" if mode == "containers" and abs_i == idx else " "
                 safe_addstr(stdscr, y, inner_x, f"{prefix} {marker} {name}"[:inner_w], 2 if mode == "containers" and abs_i == idx else 0)
         elif container_start_y <= bottom_limit:
-            safe_addstr(stdscr, container_start_y, inner_x, "Keine Container gefunden."[:inner_w], 1)
+            safe_addstr(stdscr, container_start_y, inner_x, "No containers found."[:inner_w], 1)
 
         if small_settings and mode == "containers" and choices:
             hint = f"{idx+1}/{len(choices)} | a=alle"
@@ -1128,7 +1128,7 @@ def draw_settings(stdscr, state):
             state.config["containers"] = state.selected_containers
             state.config["bcache_device"] = selected_device
             ok, msg = save_config(state.config)
-            state.config_notice = "Config gespeichert." if ok else f"Config speichern fehlgeschlagen: {msg}"
+            state.config_notice = "Config saved." if ok else f"Failed to save config: {msg}"
             refresh_device_selection(state)
             return
 
@@ -1139,32 +1139,32 @@ def info_lines(state):
     return [
         f"Linux Bcache Monitor v{__version__}",
         "Credits: by Fabian Schmeltzer",
-        "KI-Hinweis: Dieses Programm wurde mit KI-Unterstützung geschrieben; es kann Fehler enthalten.",
-        f"Bugreports: {issue_url}",
+        "AI note: This program was written with AI assistance and may contain errors.",
+        f"Bug reports: {issue_url}",
         "",
-        "Rechtlicher Hinweis (keine Rechtsberatung): Das Tool wird ohne Gewährleistung bereitgestellt. Prüfe vor produktiver Nutzung License, Haftung und Eignung. Ohne explizite Open-Source-Lizenz gelten grundsätzlich die üblichen Urheberrechte; GitHub erlaubt insbesondere das Anzeigen und Forken öffentlicher Repositories innerhalb seiner Plattformbedingungen. Für verbindliche Fragen bitte juristischen Rat einholen.",
+        "Legal note (not legal advice): This tool is provided without warranty. Before production use, verify license, liability, and suitability. Without an explicit open-source license, standard copyright rules generally apply; GitHub primarily allows viewing and forking public repositories within platform terms. For binding legal questions, consult legal counsel.",
         "",
-        "Werte im Hauptbildschirm:",
-        "EFF: Cache-Effizienz = Total Hits / (Total Hits + Total Misses). Wichtig, weil niedrige Werte bedeuten, dass viele Reads an der HDD statt aus dem SSD-Cache landen.",
-        "DIRTY: Datenmenge, die im Cache liegt und noch auf das Backing Device/HDD zurückgeschrieben werden muss. Wichtig im Writeback-Modus wegen Performance- und Ausfallrisiko.",
-        "MISS/HIT: Verhältnis der aktuellen Misses pro Sekunde zu Hits pro Sekunde. Wichtig, weil Werte >= 1 zeigen, dass mehr Anfragen am Cache vorbeigehen als bedient werden.",
-        "LIVE HIT/s und MISS/s: Momentane Änderung der bcache-Zähler pro Sekunde. Wichtig für Lastspitzen und Live-Diagnose.",
-        "GRAPH: Rote Linie = MISS/s, grüne Linie = HIT/s. Wichtig, um kurze Peaks und Trends schneller zu sehen als in Einzelzahlen.",
-        "H/M current/avg/peak: aktueller Wert, Fenstermittel, Spitzenwert. Wichtig, um Livewerte mit der jüngsten Historie zu vergleichen.",
-        "MIX: Anteil der aktuellen bcache-Ereignisse; M ist Miss-Anteil, H ist Hit-Anteil. Bei 0/s Gesamtlast zeigt das Tool MIX idle, weil Prozentwerte nicht aussagekräftig wären.",
-        "DELTA: Vergleich aktueller Werte mit dem Fensterdurchschnitt. Bei Idle oder sehr kleiner Baseline wird n/a angezeigt, weil Prozentwerte wie -100% sonst irreführend wären.",
-        "HEALTH: Ampel aus EFF, MISS/HIT und Miss-Trend. Wichtig als schnelle Warnung; sie ersetzt keine Ursachenanalyse.",
-        "CACHE NUMBERS: Totale Hits/Misses, Effizienz, Peak-Raten, Cache-Modus, Cache-Größe, Writeback-Zielrate, echter HDD-Schreibdurchsatz und freier Writeback-Anteil.",
-        "CONTAINERS CPU/RAM/DISK: Docker-Statistiken. DISK zeigt Read- und Write-Rate aus Docker BlockIO-Deltas und hält die letzte Rate bis zum nächsten Docker-Sample stabil.",
+        "Values on the main screen:",
+        "EFF: Cache efficiency = Total Hits / (Total Hits + Total Misses). Important because low values indicate many reads hit HDD instead of SSD cache.",
+        "DIRTY: Amount of data in cache that still must be written back to the backing device/HDD. Important in writeback mode due to performance and failure risk.",
+        "MISS/HIT: Ratio of current misses per second to hits per second. Important because values >= 1 indicate more requests bypass cache than are served by it.",
+        "LIVE HIT/s and MISS/s: Current per-second change of bcache counters. Important for load spikes and live diagnosis.",
+        "GRAPH: Red line = MISS/s, green line = HIT/s. Useful for spotting short peaks and trends faster than raw numbers.",
+        "H/M current/avg/peak: current value, window average, peak value. Useful to compare live values with recent history.",
+        "MIX: Share of current bcache events; M is miss share, H is hit share. At 0/s total load, the tool shows MIX idle because percentages are not meaningful.",
+        "DELTA: Comparison of current values with window average. During idle or very small baseline, n/a is shown because percentages like -100% would be misleading.",
+        "HEALTH: Traffic-light status from EFF, MISS/HIT, and miss trend. Useful as a quick warning; it does not replace root-cause analysis.",
+        "CACHE NUMBERS: Total hits/misses, efficiency, peak rates, cache mode, cache size, writeback target rate, real HDD write throughput, and available writeback share.",
+        "CONTAINERS CPU/RAM/DISK: Docker statistics. DISK shows read/write rates from Docker BlockIO deltas and keeps last values until the next Docker sample.",
         "",
-        "Zusatzinfos und Grenzen:",
-        "HDD/Backing-Größe: Wird aus /sys/block/<device>/size berechnet. Genutzter/freier Dateisystemplatz wird über /proc/self/mountinfo und /proc/mounts gesucht, inklusive aufgelöster /dev/disk/by-* Pfade.",
-        "SSD/Cache-Größe: Wird, soweit sysfs es hergibt, aus bcache cache*/bucket_size * nbuckets berechnet. Freier Writeback-Anteil nutzt cache_available_percent.",
-        "Cache->HDD Schreibgeschwindigkeit: WB target ist die von bcache gemeldete/gedrosselte Hintergrund-Writeback-Rate. HDD write ist zusätzlich aus /sys/block/<device>/stat berechnet und näher an der tatsächlichen physischen Schreibrate.",
-        "cache_mode: writethrough/writeback/writearound/none bestimmt, wie bcache Reads/Writes behandelt. Besonders writeback kann Dirty-Daten puffern.",
-        "writeback_percent/running: Zielanteil Dirty-Daten und ob Hintergrund-Writeback aktiv ist. Wichtig, damit Dirty-Daten nicht dauerhaft liegen bleiben.",
+        "Additional info and limits:",
+        "HDD/backing size: Calculated from /sys/block/<device>/size. Used/free filesystem space is discovered via /proc/self/mountinfo and /proc/mounts, including resolved /dev/disk/by-* paths.",
+        "SSD/cache size: Calculated when sysfs exposes data, via bcache cache*/bucket_size * nbuckets. Available writeback share uses cache_available_percent.",
+        "Cache->HDD write speed: WB target is bcache's reported/throttled background writeback rate. HDD write is additionally calculated from /sys/block/<device>/stat and is closer to physical write speed.",
+        "cache_mode: writethrough/writeback/writearound/none controls how bcache handles reads/writes. In particular, writeback can buffer dirty data.",
+        "writeback_percent/running: Dirty data target percentage and whether background writeback is active. Important so dirty data does not remain indefinitely.",
         "",
-        "Tasten: Q Beenden | S Settings | R Docker neu laden | I diese Info",
+        "Keys: Q quit | S settings | R reload Docker | I this info",
     ]
 
 
@@ -1173,7 +1173,7 @@ def draw_info(stdscr, state):
     while True:
         stdscr.erase()
         maxy, maxx = stdscr.getmaxyx()
-        safe_addstr(stdscr, 0, 1, "INFO | Q/Esc zurück | ↑↓ scroll | PgUp/PgDn", 4)
+        safe_addstr(stdscr, 0, 1, "INFO | Q/Esc back | ↑↓ scroll | PgUp/PgDn", 4)
         width = max(20, maxx - 4)
         wrapped = []
         for line in info_lines(state):
@@ -1240,9 +1240,9 @@ def draw_main(stdscr):
         # DATA
         if not state.device_path:
             safe_addstr(stdscr,0,1,f"BCACHE OBSERVABILITY v{__version__}",4)
-            safe_addstr(stdscr,2,1,"ERROR: Kein bcache-Gerät verfügbar.",1)
-            safe_addstr(stdscr,3,1,"Erwartet wird ein Pfad wie /sys/block/<device>/bcache.",3)
-            safe_addstr(stdscr,4,1,"Bitte prüfen, ob bcache aktiv ist und das Device eingebunden wurde.",3)
+            safe_addstr(stdscr,2,1,"ERROR: No bcache device available.",1)
+            safe_addstr(stdscr,3,1,"Expected a path like /sys/block/<device>/bcache.",3)
+            safe_addstr(stdscr,4,1,"Please verify bcache is active and the device is attached.",3)
             safe_addstr(stdscr,maxy-1,1,"Q=quit")
             stdscr.refresh()
             if stdscr.getch() in [ord('q'),ord('Q')]:
@@ -1290,7 +1290,7 @@ def draw_main(stdscr):
         graph_min_h = 4 if compact_mode else 6
         graph_max_fraction = 0.34 if narrow_mode else 0.32
         graph_max_h = 12 if compact_mode else 16
-        # Container-Bereich früher sichtbar machen: feste Reserve für Health + Container-Header/Tabelle.
+        # Make the container section visible earlier: fixed reserve for Health + container header/table.
         reserved_after_graph = 8 if compact_mode else (13 if narrow_mode else 12)
         graph_h = max(
             graph_min_h,
@@ -1461,7 +1461,7 @@ def draw_main(stdscr):
         safe_addstr(stdscr, y, io_x, "DISK", 4)
         y += 1
         if (maxy - 2) - y < 1:
-            safe_addstr(stdscr, y, table_start_x, "Nicht genug Platz für Containeranzeige.", 3)
+            safe_addstr(stdscr, y, table_start_x, "Not enough space for container display.", 3)
         now_ts = time.time()
         current_io_totals = {}
         for name,cpu,mem,mem_usage_raw,block_io_raw in state.docker_cache:
