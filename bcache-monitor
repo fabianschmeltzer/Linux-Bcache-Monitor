@@ -3,7 +3,7 @@ import curses, time, subprocess, os, sys, urllib.request, glob, json, textwrap, 
 from dataclasses import dataclass, field
 from collections import deque
 
-__version__ = "0.7.01"
+__version__ = "0.8.0"
 
 # URLs can be overridden for your publish target, e.g. GitHub raw links.
 VERSION_URL = os.environ.get("BCACHE_MONITOR_VERSION_URL", "https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monitor/main/VERSION")
@@ -65,8 +65,73 @@ DEFAULT_CONFIG = {
         "piwigo",
     ],
     "bcache_device": "",
+    "language": "de",
 }
 CONFIG_PATH = os.path.expanduser("~/.config/bcache-monitor/config.json")
+
+
+
+TRANSLATIONS = {
+    "de": {
+        "settings": "EINSTELLUNGEN",
+        "containers": "Container (Mehrfachauswahl):",
+        "device": "Gerät (Einzelauswahl):",
+        "language": "Sprache:",
+        "footer": "FOOTER/HOTKEYS | Q beenden | S Einstellungen | R neu laden | I Info",
+        "dependency": "HINWEIS",
+        "diagnosis_title": "DIAGNOSE",
+        "problem_detected": "Problem erkannt",
+        "possible_causes": "Mögliche Ursachen",
+        "recommended_action": "Empfohlene Maßnahme",
+        "no_problem": "Keine kritischen Probleme erkannt.",
+        "health": "GESUNDHEIT",
+        "recommend": "EMPFEHLUNG",
+    },
+    "en": {
+        "settings": "SETTINGS",
+        "containers": "Container (Multi-Select):",
+        "device": "Device (Single-Select):",
+        "language": "Language:",
+        "footer": "FOOTER/HOTKEYS | Q quit | S settings | R reload | I info",
+        "dependency": "NOTICE",
+        "diagnosis_title": "DIAGNOSIS",
+        "problem_detected": "Problem detected",
+        "possible_causes": "Possible causes",
+        "recommended_action": "Recommended action",
+        "no_problem": "No critical problems detected.",
+        "health": "HEALTH",
+        "recommend": "RECOMMEND",
+    },
+}
+
+def language_from_config(config):
+    lang = (config or {}).get("language", DEFAULT_CONFIG["language"])
+    return lang if lang in TRANSLATIONS else DEFAULT_CONFIG["language"]
+
+def tr(config_or_state, key):
+    config = getattr(config_or_state, "config", config_or_state)
+    lang = language_from_config(config)
+    return TRANSLATIONS.get(lang, TRANSLATIONS["de"]).get(key, TRANSLATIONS["en"].get(key, key))
+
+def check_optional_dependencies():
+    results = []
+    for command, hint in DEPENDENCY_INSTALL_HINTS.items():
+        installed = shutil.which(command) is not None
+        results.append({
+            "command": command,
+            "installed": installed,
+            "status": "OK" if installed else "MISSING",
+            "hint": "" if installed else hint,
+        })
+    return results
+
+def dependency_summary_lines(smart_health=None, docker_state=""):
+    lines = dependency_warnings(smart_health, docker_state)
+    seen = set(lines)
+    for item in check_optional_dependencies():
+        if not item["installed"] and item["hint"] not in seen:
+            lines.append(item["hint"]); seen.add(item["hint"])
+    return lines
 
 # ---------- SAFE DRAW ----------
 
@@ -736,6 +801,216 @@ def recommendations(eff, details, smart_health):
     return recs or ["No action required; continue monitoring trends."]
 
 
+
+def average(values):
+    vals = [float(v) for v in (values or []) if v is not None]
+    return sum(vals) / len(vals) if vals else 0.0
+
+
+def performance_comparison(before_eff, after_eff):
+    if before_eff is None or after_eff is None:
+        return {
+            "before": before_eff,
+            "after": after_eff,
+            "delta": None,
+            "summary": "Not enough data for before/after comparison.",
+        }
+    delta = after_eff - before_eff
+    return {
+        "before": before_eff,
+        "after": after_eff,
+        "delta": delta,
+        "summary": f"Before {before_eff:.0f}% -> after {after_eff:.0f}% ({delta:+.0f}%).",
+    }
+
+
+def detect_anomalies(write_history, current_write_rate, multiplier=4.0, minimum_baseline=50 * 1024 * 1024):
+    baseline = average(write_history)
+    if current_write_rate is None or baseline <= 0:
+        return {
+            "anomaly": False,
+            "baseline": baseline,
+            "current": current_write_rate,
+            "message": "No write-rate baseline yet.",
+        }
+    threshold = max(baseline * multiplier, minimum_baseline)
+    anomaly = current_write_rate > threshold
+    message = (
+        f"Unusual write load: {format_io_rate(current_write_rate)} vs baseline {format_io_rate(baseline)}."
+        if anomaly else "Write load is within the learned baseline."
+    )
+    return {
+        "anomaly": anomaly,
+        "baseline": baseline,
+        "current": current_write_rate,
+        "threshold": threshold,
+        "message": message,
+    }
+
+
+def docker_top_io(docker_io_rates, limit=3):
+    rows = []
+    for name, rates in (docker_io_rates or {}).items():
+        read_rate, write_rate = rates
+        total = (read_rate or 0) + (write_rate or 0)
+        rows.append({
+            "name": name,
+            "read_rate": read_rate or 0,
+            "write_rate": write_rate or 0,
+            "total_rate": total,
+        })
+    rows.sort(key=lambda item: item["total_rate"], reverse=True)
+    total_all = sum(item["total_rate"] for item in rows)
+    for item in rows:
+        item["share_percent"] = (item["total_rate"] / total_all * 100.0) if total_all > 0 else 0.0
+    return rows[:limit]
+
+
+def cache_size_advice(details):
+    cache_bytes = details.get("cache_capacity") or details.get("cache_size_bytes") or 0
+    backing_bytes = details.get("backing_size") or 0
+    if cache_bytes <= 0 or backing_bytes <= 0:
+        return {
+            "status": "unknown",
+            "message": "Cache-size advice needs readable cache and backing sizes.",
+        }
+    recommended = max(64 * 1024 ** 3, min(256 * 1024 ** 3, int(backing_bytes * 0.10)))
+    delta = cache_bytes - recommended
+    if abs(delta) < 8 * 1024 ** 3:
+        status = "ok"
+        message = f"Cache size looks balanced ({format_bytes(cache_bytes)})."
+    elif delta > 0:
+        status = "oversized"
+        message = (
+            f"Cache may be oversized: {format_bytes(cache_bytes)} current, "
+            f"{format_bytes(recommended)} recommended, {format_bytes(delta)} potential saving."
+        )
+    else:
+        status = "undersized"
+        message = f"Cache may be too small: {format_bytes(cache_bytes)} current, {format_bytes(recommended)} recommended."
+    return {
+        "status": status,
+        "current_bytes": cache_bytes,
+        "recommended_bytes": recommended,
+        "delta_bytes": delta,
+        "message": message,
+    }
+
+
+def maintenance_guard(details, smart_health):
+    blockers = []
+    dirty = details.get("dirty_bytes") or 0
+    if dirty > 0:
+        blockers.append(f"{format_bytes(dirty)} dirty data present")
+    if (
+        smart_health
+        and smart_health.get("life_remaining_percent") is not None
+        and smart_health["life_remaining_percent"] < 15
+    ):
+        blockers.append("cache SSD life below 15%")
+    if smart_health and smart_health.get("temperature_c") is not None and smart_health["temperature_c"] > 70:
+        blockers.append("cache SSD temperature critical")
+    message = "Upgrade/maintenance safe." if not blockers else "Wait before maintenance: " + "; ".join(blockers)
+    return {"safe": not blockers, "blockers": blockers, "message": message}
+
+
+def life_prediction(smart_health, years_at_current_rate=2.8):
+    life = smart_health.get("life_remaining_percent") if smart_health else None
+    if life is None:
+        return "SSD lifetime prediction needs SMART/NVMe life data."
+    if life <= 0:
+        return "SSD life appears exhausted; replace immediately."
+    estimated_years = max(0.1, (life / 100.0) * years_at_current_rate / 0.7)
+    return f"Estimated remaining SSD lifetime: about {estimated_years:.1f} years (trend estimate, verify with SMART history)."
+
+
+def auto_tuning_suggestions(eff, details, anomaly=None):
+    suggestions = []
+    mode = format_cache_mode(details.get("cache_mode"))
+    wb_pct = _parse_percent(details.get("writeback_percent"))
+    if eff < 80:
+        suggestions.append({
+            "setting": "sequential_cutoff",
+            "from": "current",
+            "to": "higher (for example 16M)",
+            "reason": "Improve hit rate when sequential reads bypass cache too aggressively.",
+        })
+    if mode == "writeback" and wb_pct is not None and wb_pct < 20 and not (anomaly or {}).get("anomaly"):
+        suggestions.append({
+            "setting": "writeback_percent",
+            "from": str(int(wb_pct)),
+            "to": "20",
+            "reason": "Allow more writeback buffering when dirty-data risk is low.",
+        })
+    if mode in ("none", "N/A"):
+        suggestions.append({
+            "setting": "cache_mode",
+            "from": mode,
+            "to": "writethrough/writeback",
+            "reason": "Cache is inactive.",
+        })
+    return suggestions or [{
+        "setting": "none",
+        "from": "-",
+        "to": "-",
+        "reason": "No tuning change recommended from current snapshot.",
+    }]
+
+
+def automatic_diagnosis(eff_history, eff, hps, mps, details, smart_health, docker_io_rates=None):
+    previous = average(list(eff_history or [])[:-1]) if eff_history and len(eff_history) > 1 else None
+    causes = []
+    if mps > hps and (hps + mps) > 0:
+        causes.append((False, "Many cache misses / possible sequential or cold workload"))
+    if details.get("cache_available_percent") is not None and details["cache_available_percent"] < 5:
+        causes.append((False, "Cache SSD available writeback space is nearly full"))
+    if docker_top_io(docker_io_rates or {}, 1):
+        top = docker_top_io(docker_io_rates, 1)[0]
+        if top["share_percent"] >= 50:
+            causes.append((True, f"Container {top['name']} causes {top['share_percent']:.0f}% of visible container I/O"))
+    if smart_health and smart_health.get("temperature_c") and smart_health["temperature_c"] > 60:
+        causes.append((False, "Cache SSD temperature is high"))
+    problem = eff < 70 or (previous is not None and eff < previous * 0.65)
+    recommendation = "Increase sequential_cutoff and compare before/after hit rate." if eff < 80 else "Continue monitoring; no immediate action required."
+    if details.get("dirty_bytes"):
+        recommendation = "Wait for dirty data to drain before risky maintenance."
+    return {
+        "problem": problem,
+        "previous_eff": previous,
+        "current_eff": eff,
+        "causes": causes or [(True, "No obvious root cause found in current snapshot")],
+        "recommendation": recommendation,
+    }
+
+
+def raspberry_pi_status():
+    uasp = "unknown"
+    try:
+        drivers = []
+        for path in glob.glob("/sys/bus/usb/drivers/*"):
+            drivers.append(os.path.basename(path).lower())
+        if "uas" in drivers:
+            uasp = "yes"
+    except OSError:
+        pass
+    temp = None
+    raw = read("/sys/class/thermal/thermal_zone0/temp")
+    if raw:
+        try:
+            temp = float(raw) / 1000.0
+        except ValueError:
+            temp = None
+    io_wait = None
+    try:
+        with open('/proc/stat', 'r', encoding='utf-8') as src:
+            parts = src.readline().split()
+        vals = [int(x) for x in parts[1:]]
+        total = sum(vals)
+        io_wait = (vals[4] / total * 100.0) if total else None
+    except (OSError, ValueError, IndexError):
+        pass
+    return {"uasp": uasp, "cpu_temp_c": temp, "io_wait_percent": io_wait}
+
 def append_history_sample(path, device, eff, details, smart_health, now_ts=None):
     now_ts = now_ts or time.time()
     directory = os.path.dirname(path)
@@ -849,6 +1124,7 @@ def default_config():
     return {
         "containers": list(DEFAULT_CONFIG["containers"]),
         "bcache_device": DEFAULT_CONFIG["bcache_device"],
+        "language": DEFAULT_CONFIG["language"],
     }
 
 
@@ -874,6 +1150,10 @@ def _sanitize_config(raw):
     dev = raw.get("bcache_device")
     if isinstance(dev, str):
         cfg["bcache_device"] = dev.strip()
+
+    language = raw.get("language")
+    if isinstance(language, str) and language.strip().lower() in ("de", "en"):
+        cfg["language"] = language.strip().lower()
 
     return cfg
 
@@ -1076,6 +1356,7 @@ class AppState:
     pt: float = 0.0
     graph_scale: float = 1.0
     eff_history: deque = field(default_factory=lambda: deque(maxlen=HISTORY))
+    backing_write_history: deque = field(default_factory=lambda: deque(maxlen=HISTORY))
 
 
 def refresh_device_selection(state):
@@ -1235,7 +1516,7 @@ def draw_meter(value, width, color, empty_color=4, empty_char="░"):
         return "", ""
     clamped = max(0.0, min(value, 100.0))
     filled = int(round((clamped / 100.0) * width))
-    return ("█" * filled, empty_char * max(0, width - filled))
+    return "█" * filled, empty_char * max(0, width - filled)
 
 def pct_change(current, baseline):
     if baseline <= 0:
@@ -1266,6 +1547,8 @@ def draw_settings(stdscr, state):
     device_scroll = 0
     container_scroll = 0
     mode = "containers"
+    language_idx = 0 if language_from_config(state.config) == "de" else 1
+    language_choices = [("de", "Deutsch"), ("en", "English")]
     while True:
         stdscr.erase()
         my, mx = stdscr.getmaxyx()
@@ -1287,10 +1570,10 @@ def draw_settings(stdscr, state):
         safe_addstr(stdscr, box_y + box_h - 1, box_x, "└", 4); safe_addstr(stdscr, box_y + box_h - 1, box_x + box_w - 1, "┘", 4)
 
         small_settings = my < 20 or mx < 70
-        header_lines = ["SETTINGS"]
-        nav_text = "↑↓ Navigate | Tab section | Space select | Enter save | Esc back"
+        header_lines = [tr(state, "settings")]
+        nav_text = "↑↓ Navigate | Tab section | Space select | Enter save | Esc back" if language_from_config(state.config) == "en" else "↑↓ Navigieren | Tab Bereich | Space Auswahl | Enter speichern | Esc zurück"
         if small_settings:
-            nav_text = "↑↓ scroll | Tab switch | Space select | Enter save | Esc back"
+            nav_text = "↑↓ scroll | Tab switch | Space select | Enter save | Esc back" if language_from_config(state.config) == "en" else "↑↓ scroll | Tab wechseln | Space Auswahl | Enter speichern | Esc zurück"
         header_lines += textwrap.wrap(nav_text, width=inner_w)[:2]
         header_lines += textwrap.wrap(f"docker ps: {ps_state}", width=inner_w)[:1]
         if not small_settings:
@@ -1305,7 +1588,7 @@ def draw_settings(stdscr, state):
             cur_y += 1
 
         if cur_y <= bottom_limit:
-            safe_addstr(stdscr, cur_y, inner_x, "Device (Single-Select):"[:inner_w], 4 if mode == "device" else 0)
+            safe_addstr(stdscr, cur_y, inner_x, tr(state, "device")[:inner_w], 4 if mode == "device" else 0)
             cur_y += 1
 
         remaining_rows = max(0, bottom_limit - cur_y + 1)
@@ -1318,9 +1601,9 @@ def draw_settings(stdscr, state):
 
         container_label_y = cur_y + device_rows
         if container_label_y <= bottom_limit:
-            label = "Container (Multi-Select):"
+            label = tr(state, "containers")
             if small_settings and mode == "device":
-                label = "Container (Tab to switch)"
+                label = "Container (Tab to switch)" if language_from_config(state.config) == "en" else "Container (Tab zum Wechseln)"
             safe_addstr(stdscr, container_label_y, inner_x, label[:inner_w], 4 if mode == "containers" else 0)
         container_start_y = container_label_y + 1
 
@@ -1366,6 +1649,11 @@ def draw_settings(stdscr, state):
         elif container_start_y <= bottom_limit:
             safe_addstr(stdscr, container_start_y, inner_x, "No containers found."[:inner_w], 1)
 
+        lang_y = bottom_limit - (1 if small_settings and mode in ("containers", "device") else 0)
+        if lang_y > box_y and lang_y <= bottom_limit:
+            lang_line = tr(state, "language") + " " + " | ".join(("(*) " if code == language_from_config(state.config) else "( ) ") + label for code, label in language_choices)
+            safe_addstr(stdscr, lang_y, inner_x, lang_line[:inner_w], 4 if mode == "language" else 0)
+
         if small_settings and mode == "containers" and choices:
             hint = f"{idx+1}/{len(choices)} | a=alle"
             safe_addstr(stdscr, bottom_limit, inner_x, hint[:inner_w], 4)
@@ -1373,7 +1661,9 @@ def draw_settings(stdscr, state):
         stdscr.refresh()
         ch = stdscr.getch()
         if ch in [27, ord("q"), ord("Q")]: return
-        if ch == 9: mode = "device" if mode == "containers" else "containers"
+        if ch == 9:
+            order = ["containers", "device", "language"]
+            mode = order[(order.index(mode) + 1) % len(order)]
         elif ch in [curses.KEY_UP, ord("k")] and mode == "containers" and choices: idx = (idx - 1) % len(choices)
         elif ch in [curses.KEY_DOWN, ord("j")] and mode == "containers" and choices: idx = (idx + 1) % len(choices)
         elif ch in [curses.KEY_UP, ord("k")] and mode == "device" and device_choices: dev_idx = (dev_idx - 1) % len(device_choices)
@@ -1381,13 +1671,17 @@ def draw_settings(stdscr, state):
         elif ch == ord(" ") and mode == "containers" and choices:
             name = choices[idx]; selected.remove(name) if name in selected else selected.add(name)
         elif ch == ord(" ") and mode == "device" and device_choices: selected_device = device_choices[dev_idx]
+        elif ch == ord(" ") and mode == "language":
+            language_idx = (language_idx + 1) % len(language_choices)
+            state.config["language"] = language_choices[language_idx][0]
         elif ch in [ord("a"), ord("A")] and mode == "containers": selected = set() if selected else set(choices)
         elif ch in [10, 13]:
             state.selected_containers = sorted(selected)
             state.config["containers"] = state.selected_containers
             state.config["bcache_device"] = selected_device
+            state.config["language"] = language_choices[language_idx][0]
             ok, msg = save_config(state.config)
-            state.config_notice = "Config saved." if ok else f"Failed to save config: {msg}"
+            state.config_notice = ("Config saved." if language_from_config(state.config) == "en" else "Konfiguration gespeichert.") if ok else f"Failed to save config: {msg}"
             refresh_device_selection(state)
             return
 
@@ -1536,6 +1830,7 @@ def draw_main(stdscr):
             state.backing_io_prev = (details["device_stat"], now)
         if backing_write_rate is not None:
             state.backing_write_rate_bytes = backing_write_rate
+            state.backing_write_history.append(backing_write_rate)
         dirty_bytes = details["dirty_bytes"]
         dirty_display=format_dirty_value(dirty_bytes)
 
@@ -1641,7 +1936,7 @@ def draw_main(stdscr):
             if state.update_notice: safe_addstr(stdscr,maxy-2,1,state.update_notice,3)
             if state.config_notice: safe_addstr(stdscr,maxy-2,1,state.config_notice,3)
             elif state.device_warning: safe_addstr(stdscr,maxy-2,1,state.device_warning,3)
-            safe_addstr(stdscr,maxy-1,1,"FOOTER/HOTKEYS | Q quit | S settings | R reload | I info",4)
+            safe_addstr(stdscr,maxy-1,1,tr(state, "footer"),4)
             stdscr.refresh()
             action = handle_keypress(stdscr.getch(), state)
             if action == "quit": break
@@ -1688,7 +1983,19 @@ def draw_main(stdscr):
         safe_addstr(stdscr,y,stats_right_x,hdd_used)
         y += 1
         if y < maxy - 5:
-            safe_addstr(stdscr,y,1,("RECOMMEND: " + recs[0])[:maxx-2],3 if report["score"] < 80 else 2)
+            safe_addstr(stdscr,y,1,(tr(state, "recommend") + ": " + recs[0])[:maxx-2],3 if report["score"] < 80 else 2)
+            y += 1
+        diag = automatic_diagnosis(state.eff_history, eff, hps, mps, details, smart_health, state.docker_io_rates)
+        anomaly = detect_anomalies(list(state.backing_write_history)[:-1], state.backing_write_rate_bytes)
+        if y < maxy - 6:
+            safe_addstr(stdscr,y,1,(tr(state, "diagnosis_title") + ": " + (diag["recommendation"] if diag["problem"] else tr(state, "no_problem")))[:maxx-2],3 if diag["problem"] else 2)
+            y += 1
+        if anomaly.get("anomaly") and y < maxy - 6:
+            safe_addstr(stdscr,y,1,("ANOMALY: " + anomaly["message"])[:maxx-2],1)
+            y += 1
+        if y < maxy - 6:
+            guard = maintenance_guard(details, smart_health)
+            safe_addstr(stdscr,y,1,("MAINTENANCE: " + guard["message"])[:maxx-2],2 if guard["safe"] else 3)
             y += 1
         y += 1
         safe_addstr(stdscr,y,1,"CONTAINERS",4)
@@ -1713,10 +2020,10 @@ def draw_main(stdscr):
         else:
             safe_addstr(stdscr,y,32,data_line,4)
             y += 1
-        for warning in dependency_warnings(smart_health, state.docker_state):
+        for warning in dependency_summary_lines(smart_health, state.docker_state):
             if y >= maxy - 3:
                 break
-            safe_addstr(stdscr, y, 1, ("HINWEIS: " + warning)[:maxx-2], 3)
+            safe_addstr(stdscr, y, 1, (f"{tr(state, 'dependency')}: " + warning)[:maxx-2], 3)
             y += 1
         y += 1
         table_start_x = 1
@@ -1790,7 +2097,7 @@ def draw_main(stdscr):
         if state.update_notice: safe_addstr(stdscr,maxy-2,1,state.update_notice,3)
         if state.config_notice: safe_addstr(stdscr,maxy-2,1,state.config_notice,3)
         elif state.device_warning: safe_addstr(stdscr,maxy-2,1,state.device_warning,3)
-        safe_addstr(stdscr,maxy-1,1,"FOOTER/HOTKEYS | Q quit | S settings | R reload | I info",4)
+        safe_addstr(stdscr,maxy-1,1,tr(state, "footer"),4)
 
         stdscr.refresh()
 
