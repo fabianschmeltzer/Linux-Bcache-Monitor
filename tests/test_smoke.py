@@ -225,3 +225,35 @@ def test_docker_top_io_calculates_largest_share():
 
     assert top["name"] == "immich"
     assert round(top["share_percent"]) == 91
+
+
+def test_self_update_uses_script_version_when_version_file_is_stale(monkeypatch, tmp_path):
+    installed = tmp_path / "bcache-monitor"
+    installed.write_text("#!/usr/bin/env python3\n__version__ = \"0.8.0\"\n" + "# old\n" * 300)
+    installed.chmod(0o755)
+    remote_script = "#!/usr/bin/env python3\n__version__ = \"0.8.1\"\n" + "# new\n" * 300
+    exec_args = {}
+
+    monkeypatch.delenv(bcache_monitor.UPDATE_FAIL_COUNT_ENV, raising=False)
+    monkeypatch.delenv("BCACHE_MONITOR_UPDATED_TO", raising=False)
+    monkeypatch.setattr(bcache_monitor, "__file__", str(installed))
+    monkeypatch.setattr(bcache_monitor, "read_remote_text", lambda _url: "0.8.0")
+    monkeypatch.setattr(bcache_monitor, "read_remote_bytes", lambda _url: remote_script.encode("utf-8"))
+    monkeypatch.setattr(bcache_monitor.time, "sleep", lambda _seconds: None)
+
+    def fake_execv(executable, args):
+        exec_args["executable"] = executable
+        exec_args["args"] = args
+        raise SystemExit
+
+    monkeypatch.setattr(bcache_monitor.os, "execv", fake_execv)
+
+    try:
+        bcache_monitor.self_update_if_needed()
+    except SystemExit:
+        pass
+
+    assert installed.read_text() == remote_script
+    assert bcache_monitor.os.environ["BCACHE_MONITOR_UPDATED_FROM"] == "0.8.0"
+    assert bcache_monitor.os.environ["BCACHE_MONITOR_UPDATED_TO"] == "0.8.1"
+    assert exec_args["args"][1] == str(installed)
