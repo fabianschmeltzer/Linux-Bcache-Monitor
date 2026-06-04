@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-import curses, time, subprocess, os, sys, urllib.request, glob, json, textwrap, shutil
+import curses, time, subprocess, os, sys, urllib.request, glob, json, textwrap, shutil, csv
 from dataclasses import dataclass, field
 from collections import deque
 
-__version__ = "0.6.00"
+__version__ = "0.7.00"
 
 # URLs can be overridden for your publish target, e.g. GitHub raw links.
 VERSION_URL = os.environ.get("BCACHE_MONITOR_VERSION_URL", "https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monitor/main/VERSION")
@@ -24,6 +24,8 @@ MISS_TREND_WARN=1.20
 MISS_TREND_CRITICAL=1.50
 MIN_DELTA_BASELINE_PS=1.0
 MIN_HEALTH_TREND_EVENTS=3
+HISTORY_CSV_PATH = os.environ.get("BCACHE_MONITOR_HISTORY_CSV", os.path.expanduser("~/.local/share/bcache-monitor/history.csv"))
+SMART_REFRESH_SECONDS = float(os.environ.get("BCACHE_MONITOR_SMART_REFRESH_SECONDS", "60"))
 
 MIN_SCRIPT_SIZE_BYTES = 1024
 MAX_SCRIPT_SIZE_BYTES = 512 * 1024
@@ -519,8 +521,193 @@ def read_bcache_details(device_name, bcache_path):
         "writeback_running": read(f"{bcache_path}/writeback_running") if bcache_path else None,
         "cache_set_path": cache_set_path,
         "device_stat": read_block_device_stat(device_name),
+        "cache_devices": discover_cache_device_names(cache_set_path),
     }
 
+
+
+def discover_cache_device_names(cache_set_path):
+    if not cache_set_path:
+        return []
+    devices = []
+    for cache_path in sorted(glob.glob(os.path.join(cache_set_path, "cache*"))):
+        real = os.path.realpath(cache_path)
+        name = os.path.basename(real)
+        if name and name.startswith(("sd", "nvme", "vd", "xvd")):
+            devices.append(name)
+    return devices
+
+
+def parse_smart_health_text(stdout):
+    health = {"available_spare_percent": None, "wear_used_percent": None, "life_remaining_percent": None, "temperature_c": None, "tbw_bytes": None}
+    for line in str(stdout or "").splitlines():
+        lower = line.lower()
+        _, sep, rhs = line.partition(":")
+        if not sep:
+            continue
+        value = rhs.strip().replace(",", "")
+        if "percentage used" in lower or "wear_leveling_count" in lower or "wear leveling count" in lower:
+            pct = _parse_percent(value.split()[0] if value.split() else value)
+            if pct is not None:
+                health["wear_used_percent"] = pct
+        elif "available spare" in lower and "threshold" not in lower:
+            health["available_spare_percent"] = _parse_percent(value.split()[0] if value.split() else value)
+        elif "temperature" in lower and health["temperature_c"] is None:
+            parts = value.replace("Celsius", "").replace("°C", "").split()
+            try:
+                health["temperature_c"] = float(parts[0])
+            except (ValueError, IndexError):
+                pass
+        elif "data units written" in lower:
+            try:
+                units = int(value.split()[0])
+                health["tbw_bytes"] = units * 512000
+            except (ValueError, IndexError):
+                pass
+        elif "total_lbas_written" in lower:
+            try:
+                health["tbw_bytes"] = int(value.split()[0]) * 512
+            except (ValueError, IndexError):
+                pass
+    if health["wear_used_percent"] is not None:
+        health["life_remaining_percent"] = max(0.0, 100.0 - health["wear_used_percent"])
+    elif health["available_spare_percent"] is not None:
+        health["life_remaining_percent"] = health["available_spare_percent"]
+    return health
+
+
+def read_ssd_health(cache_device_names):
+    for name in cache_device_names or []:
+        dev_path = f"/dev/{name}"
+        if name.startswith("nvme"):
+            result = _run_command(["nvme", "smart-log", dev_path], timeout=2.5)
+            if result["ok"]:
+                health = parse_smart_health_text(result["stdout"])
+                health.update({"device": dev_path, "source": "nvme"})
+                return health
+        result = _run_command(["smartctl", "-A", dev_path], timeout=2.5)
+        if result["ok"]:
+            health = parse_smart_health_text(result["stdout"])
+            health.update({"device": dev_path, "source": "smartctl"})
+            return health
+    return {"device": cache_device_names[0] if cache_device_names else "", "source": "unavailable", "available_spare_percent": None, "wear_used_percent": None, "life_remaining_percent": None, "temperature_c": None, "tbw_bytes": None}
+
+
+def efficiency_label(eff):
+    if eff >= 90:
+        return "Sehr gut"
+    if eff >= 80:
+        return "Gut"
+    if eff >= 50:
+        return "Warnung"
+    return "Cache bringt kaum Nutzen"
+
+
+def estimate_flush_seconds(dirty_bytes, flush_rate_bytes):
+    if dirty_bytes is None or dirty_bytes <= 0:
+        return 0.0
+    if not flush_rate_bytes or flush_rate_bytes <= 0:
+        return None
+    return dirty_bytes / flush_rate_bytes
+
+
+def format_duration(seconds):
+    if seconds is None:
+        return "N/A"
+    seconds = int(round(seconds))
+    minutes, sec = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {sec}s"
+    return f"{sec}s"
+
+
+def health_report(eff, details, smart_health, hps=0, mps=0):
+    score = 100
+    warnings = []
+    mode = format_cache_mode(details.get("cache_mode"))
+    dirty_bytes = details.get("dirty_bytes")
+    if mode in ("none", "N/A"):
+        score -= 35; warnings.append("Cache mode inactive")
+    if eff < 50:
+        score -= 25; warnings.append("Low cache hit rate")
+    elif eff < 80:
+        score -= 10; warnings.append("Cache efficiency degraded")
+    temp = smart_health.get("temperature_c") if smart_health else None
+    if temp is not None and temp > 70:
+        score -= 35; warnings.append("SSD temperature critical")
+    elif temp is not None and temp > 60:
+        score -= 15; warnings.append("SSD temperature high")
+    life = smart_health.get("life_remaining_percent") if smart_health else None
+    if life is not None and life < 15:
+        score -= 35; warnings.append("Cache SSD life below 15%")
+    elif life is not None and life < 30:
+        score -= 15; warnings.append("Cache SSD wear warning")
+    wb_pct = _parse_percent(details.get("writeback_percent"))
+    if mode == "writeback" and wb_pct is not None and wb_pct > 40:
+        score -= 10; warnings.append("High writeback percent")
+    if dirty_bytes and dirty_bytes > 50 * 1024 ** 3:
+        score -= 10; warnings.append("Large dirty data backlog")
+    score = max(0, min(100, int(score)))
+    status = "HEALTHY" if score >= 80 else ("WARNING" if score >= 50 else ("CRITICAL" if score >= 20 else "FAILURE"))
+    return {"score": score, "status": status, "warnings": warnings or ["No major issues detected"]}
+
+
+def recommendations(eff, details, smart_health):
+    recs = []
+    mode = format_cache_mode(details.get("cache_mode"))
+    if mode == "none":
+        recs.append("Cache mode is none: verify attachment and choose writethrough/writeback/writearound.")
+    if eff < 50:
+        recs.append("Hit rate is low: check working-set size, cache_available_percent, and sequential_cutoff.")
+    elif eff < 80:
+        recs.append("Hit rate is below ideal: compare recent workload with historical CSV data.")
+    flush_seconds = estimate_flush_seconds(details.get("dirty_bytes"), details.get("writeback_rate_bytes"))
+    if mode == "writeback" and flush_seconds is None and details.get("dirty_bytes"):
+        recs.append("Dirty data cannot be drained estimate: writeback_rate is unavailable or zero.")
+    life = smart_health.get("life_remaining_percent") if smart_health else None
+    if life is not None and life < 30:
+        recs.append("Plan cache SSD replacement; remaining life is below 30%.")
+    temp = smart_health.get("temperature_c") if smart_health else None
+    if temp is not None and temp > 60:
+        recs.append("Improve airflow or reduce cache load; SSD temperature is elevated.")
+    return recs or ["No action required; continue monitoring trends."]
+
+
+def append_history_sample(path, device, eff, details, smart_health, now_ts=None):
+    now_ts = now_ts or time.time()
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    exists = os.path.exists(path)
+    with open(path, "a", newline="", encoding="utf-8") as dst:
+        writer = csv.writer(dst)
+        if not exists:
+            writer.writerow(["timestamp", "device", "hit_rate_percent", "dirty_bytes", "cache_mode", "ssd_life_percent", "ssd_temp_c"])
+        writer.writerow([int(now_ts), device or "", f"{eff:.2f}", details.get("dirty_bytes") or 0, format_cache_mode(details.get("cache_mode")), smart_health.get("life_remaining_percent") if smart_health else "", smart_health.get("temperature_c") if smart_health else ""])
+
+
+def prometheus_metrics(device, eff, details, smart_health, report):
+    labels = f'device="{device or "unknown"}"'
+    mode = format_cache_mode(details.get("cache_mode"))
+    mode_state = 0 if mode in ("none", "N/A") else 1
+    lines = [
+        f"bcache_hit_ratio{{{labels}}} {eff / 100.0:.6f}",
+        f"bcache_dirty_bytes{{{labels}}} {details.get('dirty_bytes') or 0}",
+        f"bcache_cache_available_percent{{{labels}}} {details.get('cache_available_percent') if details.get('cache_available_percent') is not None else -1}",
+        f"bcache_state{{{labels},mode=\"{mode}\"}} {mode_state}",
+        f"bcache_health_score{{{labels}}} {report.get('score', 0)}",
+    ]
+    if smart_health:
+        if smart_health.get("life_remaining_percent") is not None:
+            lines.append(f"bcache_ssd_life_remaining_percent{{{labels}}} {smart_health['life_remaining_percent']}")
+        if smart_health.get("temperature_c") is not None:
+            lines.append(f"bcache_ssd_temperature_celsius{{{labels}}} {smart_health['temperature_c']}")
+        if smart_health.get("tbw_bytes") is not None:
+            lines.append(f"bcache_ssd_total_bytes_written{{{labels}}} {smart_health['tbw_bytes']}")
+    return "\n".join(lines) + "\n"
 
 def format_pct(value):
     return "N/A" if value is None else f"{value:.1f}%"
@@ -814,6 +1001,8 @@ class AppState:
     docker_io_rates: dict = field(default_factory=dict)
     backing_io_prev: tuple = None
     backing_write_rate_bytes: float = None
+    smart_cache: dict = field(default_factory=dict)
+    smart_last: float = 0.0
     available_devices: list = field(default_factory=list)
     device_name: str = ""
     device_path: str = ""
@@ -1275,6 +1464,13 @@ def draw_main(stdscr):
         eff_baseline = (sum(state.eff_history) / len(state.eff_history)) if state.eff_history else None
         state.eff_history.append(eff)
         details = read_bcache_details(state.device_name, state.device_path)
+        if now - state.smart_last >= SMART_REFRESH_SECONDS or not state.smart_cache:
+            state.smart_cache = read_ssd_health(details.get("cache_devices"))
+            state.smart_last = now
+        smart_health = state.smart_cache
+        report = health_report(eff, details, smart_health, hps, mps)
+        recs = recommendations(eff, details, smart_health)
+        flush_seconds = estimate_flush_seconds(details.get("dirty_bytes"), details.get("writeback_rate_bytes") or state.backing_write_rate_bytes)
         backing_read_rate, backing_write_rate = calculate_device_rates(state.backing_io_prev, details.get("device_stat"), now)
         if details.get("device_stat"):
             state.backing_io_prev = (details["device_stat"], now)
@@ -1289,7 +1485,7 @@ def draw_main(stdscr):
         # -------- KPI BLOCK --------
         ratio = (mps / hps) if hps > 0 else (float("inf") if mps > 0 else 0.0)
         ratio_text = "∞" if ratio == float("inf") else f"{ratio:.2f}"
-        safe_addstr(stdscr,2,1,f"KPI   | EFF {eff:.1f}%   DIRTY {dirty_display}   MISS/HIT {ratio_text}")
+        safe_addstr(stdscr,2,1,f"KPI   | SCORE {report['score']:3d}/100 {report['status']}   EFF {eff:.1f}% ({efficiency_label(eff)})   DIRTY {dirty_display}", 2 if report["score"] >= 80 else (3 if report["score"] >= 50 else 1))
         source_text = f"KPI   | LIVE HIT/s {hps}   MISS/s {mps}   SOURCE {state.device_source}"
         if maxx >= 96:
             source_text += " (config/env/auto)"
@@ -1362,7 +1558,7 @@ def draw_main(stdscr):
 
         # -------- STATUS --------
         status,color,reason=status_from_metrics(eff,hps,mps,state.miss_trend)
-        safe_addstr(stdscr, info_y, 1, f"HEALTH | PRIMARY ALERT: {status} ({reason})", color)
+        safe_addstr(stdscr, info_y, 1, f"HEALTH | SCORE {report['score']}/100 {report['status']} | PRIMARY ALERT: {status} ({reason})", color)
         info_y += 1
         eff_arrow = trend_arrow(eff, eff_baseline) if eff_baseline is not None else "→"
         ratio_arrow = trend_arrow(mps, avg_m)
@@ -1411,6 +1607,12 @@ def draw_main(stdscr):
         safe_addstr(stdscr,y,1,f"Mode:         {format_cache_mode(details['cache_mode'])}")
         safe_addstr(stdscr,y,stats_right_x,f"WB target:    {format_io_rate(details['writeback_rate_bytes'])}")
         y += 1
+        safe_addstr(stdscr,y,1,f"Flush ETA:    {format_duration(flush_seconds)}")
+        safe_addstr(stdscr,y,stats_right_x,f"SSD life:     {format_pct(smart_health.get('life_remaining_percent'))}")
+        y += 1
+        safe_addstr(stdscr,y,1,f"SSD temp:     {(str(smart_health.get('temperature_c')) + ' °C') if smart_health.get('temperature_c') is not None else 'N/A'}")
+        safe_addstr(stdscr,y,stats_right_x,f"SSD TBW:      {format_bytes(smart_health.get('tbw_bytes'))}")
+        y += 1
         safe_addstr(stdscr,y,1,f"WB percent:   {details['writeback_percent'] or 'N/A'}")
         safe_addstr(stdscr,y,stats_right_x,f"HDD write:    {format_io_rate(state.backing_write_rate_bytes)}")
         y += 1
@@ -1424,13 +1626,21 @@ def draw_main(stdscr):
         hdd_used = f"used {format_bytes(fs_usage['used'])} free {format_bytes(fs_usage['free'])}" if fs_usage else "used/free N/A"
         safe_addstr(stdscr,y,1,f"HDD/backing:  {hdd_text}")
         safe_addstr(stdscr,y,stats_right_x,hdd_used)
-        y += 2
+        y += 1
+        if y < maxy - 5:
+            safe_addstr(stdscr,y,1,("RECOMMEND: " + recs[0])[:maxx-2],3 if report["score"] < 80 else 2)
+            y += 1
+        y += 1
         safe_addstr(stdscr,y,1,"CONTAINERS",4)
         y+=1
 
         docker_refreshed = now - state.docker_last >= DOCKER_REFRESH_SECONDS
         if docker_refreshed:
             state.docker_cache, state.docker_state = list_container_stats(state.selected_containers)
+            try:
+                append_history_sample(HISTORY_CSV_PATH, state.device_name, eff, details, smart_health, now)
+            except OSError:
+                pass
             state.docker_last = now
 
         selection_label = f"{len(state.selected_containers)} selected" if state.selected_containers else "ALL (empty selection)"
@@ -1529,6 +1739,26 @@ def draw_main(stdscr):
 
         time.sleep(FRAME_SECONDS)
 
+
+def print_prometheus_and_exit_if_requested(argv):
+    if not any(arg in ("--prometheus", "--metrics") for arg in argv[1:]):
+        return False
+    config, _notice = load_config()
+    resolution = resolve_bcache_device(config.get("bcache_device", ""))
+    global BCACHE
+    BCACHE = resolution.get("path") or ""
+    h0, m0 = stats()
+    h0 = h0 or 0
+    m0 = m0 or 0
+    eff = h0 / (h0 + m0) * 100 if (h0 + m0) else 0.0
+    details = read_bcache_details(resolution.get("device"), resolution.get("path")) if resolution.get("path") else {
+        "cache_mode": None, "dirty_bytes": 0, "cache_available_percent": None, "writeback_rate_bytes": None,
+    }
+    smart_health = read_ssd_health(details.get("cache_devices", []))
+    report = health_report(eff, details, smart_health)
+    print(prometheus_metrics(resolution.get("device"), eff, details, smart_health, report), end="")
+    return True
+
 def print_version_and_exit_if_requested(argv):
     if any(arg in ("--version", "-V") for arg in argv[1:]):
         print(__version__)
@@ -1538,6 +1768,8 @@ def print_version_and_exit_if_requested(argv):
 
 def main():
     if print_version_and_exit_if_requested(sys.argv):
+        return
+    if print_prometheus_and_exit_if_requested(sys.argv):
         return
 
     updated_from = os.environ.get("BCACHE_MONITOR_UPDATED_FROM")

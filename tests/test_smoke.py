@@ -34,13 +34,13 @@ def test_version_metadata_is_in_sync():
     version = (repo_root / "VERSION").read_text().strip()
     readme = (repo_root / "README.md").read_text()
 
-    assert bcache_monitor.__version__ == version == "0.6.00"
+    assert bcache_monitor.__version__ == version == "0.7.00"
     assert f"**Version:** {version}" in readme
 
 
 def test_print_version_and_exit_for_cli_flag(capsys):
     assert bcache_monitor.print_version_and_exit_if_requested(["bcache-monitor", "--version"]) is True
-    assert capsys.readouterr().out.strip() == "0.6.00"
+    assert capsys.readouterr().out.strip() == "0.7.00"
 
 
 def test_info_lines_include_bugreport_and_ai_notice():
@@ -122,3 +122,51 @@ def test_parse_mountinfo_lines_matches_direct_device():
     lines = ["36 25 8:0 / /data rw,relatime - ext4 /dev/bcache0 rw\n"]
 
     assert bcache_monitor._parse_mountinfo_lines(lines, "bcache0") == [("/data", "/dev/bcache0")]
+
+
+
+def test_efficiency_label_classifies_low_cache_benefit():
+    assert bcache_monitor.efficiency_label(94) == "Sehr gut"
+    assert bcache_monitor.efficiency_label(22) == "Cache bringt kaum Nutzen"
+
+
+def test_estimate_flush_seconds_uses_dirty_data_and_rate():
+    assert bcache_monitor.estimate_flush_seconds(12 * 1024 * 1024, 3 * 1024 * 1024) == 4
+    assert bcache_monitor.format_duration(272) == "4m 32s"
+
+
+def test_health_report_penalizes_hot_ssd_and_low_life():
+    details = {"cache_mode": "[writeback]", "dirty_bytes": 0, "writeback_percent": "10"}
+    smart = {"temperature_c": 72, "life_remaining_percent": 12}
+    report = bcache_monitor.health_report(92, details, smart)
+
+    assert report["score"] < 80
+    assert report["status"] in {"WARNING", "CRITICAL", "FAILURE"}
+    assert "SSD temperature critical" in report["warnings"]
+    assert "Cache SSD life below 15%" in report["warnings"]
+
+
+def test_prometheus_metrics_include_health_score_and_ssd_life():
+    details = {"cache_mode": "[writeback]", "dirty_bytes": 1024, "cache_available_percent": 88.5}
+    smart = {"life_remaining_percent": 77, "temperature_c": 43, "tbw_bytes": 1234}
+    report = {"score": 91}
+
+    output = bcache_monitor.prometheus_metrics("bcache0", 94.0, details, smart, report)
+
+    assert 'bcache_hit_ratio{device="bcache0"} 0.940000' in output
+    assert 'bcache_health_score{device="bcache0"} 91' in output
+    assert 'bcache_ssd_life_remaining_percent{device="bcache0"} 77' in output
+
+
+def test_parse_smart_health_text_parses_nvme_fields():
+    raw = """
+Percentage Used:                    12%
+Data Units Written:                 1,000
+Temperature:                        43 Celsius
+"""
+    health = bcache_monitor.parse_smart_health_text(raw)
+
+    assert health["wear_used_percent"] == 12
+    assert health["life_remaining_percent"] == 88
+    assert health["temperature_c"] == 43
+    assert health["tbw_bytes"] == 512000000
