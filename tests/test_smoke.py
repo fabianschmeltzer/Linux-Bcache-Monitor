@@ -170,3 +170,14 @@ Temperature:                        43 Celsius
     assert health["life_remaining_percent"] == 88
     assert health["temperature_c"] == 43
     assert health["tbw_bytes"] == 512000000
+
+def test_smart_dependency_hint_recommends_nvme_cli_for_nvme_cache():
+    assert "nvme-cli" in bcache_monitor.smart_dependency_hint(["nvme0n1"], ["nvme"], "NOT INSTALLED")
+
+
+def test_dependency_warnings_include_missing_docker_cli_and_ssd_hint():
+    smart = bcache_monitor.base_ssd_health(["sda"], dependency_hint="Install smartmontools (smartctl) to show SATA/SAS SSD health values.")
+    warnings = bcache_monitor.dependency_warnings(smart, "NOT INSTALLED")
+
+    assert any("smartmontools" in warning for warning in warnings)
+    assert any("Docker CLI" in warning for warning in warnings)

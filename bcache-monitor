@@ -26,6 +26,12 @@ MIN_DELTA_BASELINE_PS=1.0
 MIN_HEALTH_TREND_EVENTS=3
 HISTORY_CSV_PATH = os.environ.get("BCACHE_MONITOR_HISTORY_CSV", os.path.expanduser("~/.local/share/bcache-monitor/history.csv"))
 SMART_REFRESH_SECONDS = float(os.environ.get("BCACHE_MONITOR_SMART_REFRESH_SECONDS", "60"))
+DEPENDENCY_INSTALL_HINTS = {
+    "docker": "Install Docker CLI (docker) to show container CPU/MEM/DISK values.",
+    "nvme": "Install nvme-cli (nvme) to show NVMe SSD health values.",
+    "smartctl": "Install smartmontools (smartctl) to show SATA/SAS SSD health values.",
+}
+
 
 MIN_SCRIPT_SIZE_BYTES = 1024
 MAX_SCRIPT_SIZE_BYTES = 512 * 1024
@@ -576,21 +582,75 @@ def parse_smart_health_text(stdout):
     return health
 
 
+def missing_dependency_hint(command_name):
+    return DEPENDENCY_INSTALL_HINTS.get(command_name, f"Install '{command_name}' to enable related values.")
+
+
+def smart_dependency_hint(cache_device_names, attempted_tools=None, last_status=""):
+    names = list(cache_device_names or [])
+    attempted = set(attempted_tools or [])
+    if not names:
+        return "No cache device found for SSD health values."
+
+    preferred = "nvme" if any(str(name).startswith("nvme") for name in names) else "smartctl"
+    if last_status == "NOT INSTALLED" or not attempted:
+        return missing_dependency_hint(preferred)
+    if last_status.startswith("ERR:"):
+        return f"{preferred} is installed but returned {last_status}; run as root or adjust device permissions."
+    if last_status == "TIMEOUT":
+        return f"{preferred} timed out while reading SSD health values."
+    return f"SSD health unavailable; verify {preferred} access and device support."
+
+
+def base_ssd_health(cache_device_names, source="unavailable", dependency_hint=""):
+    return {
+        "device": cache_device_names[0] if cache_device_names else "",
+        "source": source,
+        "dependency_hint": dependency_hint,
+        "available_spare_percent": None,
+        "wear_used_percent": None,
+        "life_remaining_percent": None,
+        "temperature_c": None,
+        "tbw_bytes": None,
+    }
+
+
 def read_ssd_health(cache_device_names):
-    for name in cache_device_names or []:
+    names = list(cache_device_names or [])
+    attempted_tools = []
+    last_status = ""
+    for name in names:
         dev_path = f"/dev/{name}"
         if name.startswith("nvme"):
+            attempted_tools.append("nvme")
             result = _run_command(["nvme", "smart-log", dev_path], timeout=2.5)
+            last_status = result["status"]
             if result["ok"]:
                 health = parse_smart_health_text(result["stdout"])
-                health.update({"device": dev_path, "source": "nvme"})
+                health.update({"device": dev_path, "source": "nvme", "dependency_hint": ""})
                 return health
+        attempted_tools.append("smartctl")
         result = _run_command(["smartctl", "-A", dev_path], timeout=2.5)
+        last_status = result["status"]
         if result["ok"]:
             health = parse_smart_health_text(result["stdout"])
-            health.update({"device": dev_path, "source": "smartctl"})
+            health.update({"device": dev_path, "source": "smartctl", "dependency_hint": ""})
             return health
-    return {"device": cache_device_names[0] if cache_device_names else "", "source": "unavailable", "available_spare_percent": None, "wear_used_percent": None, "life_remaining_percent": None, "temperature_c": None, "tbw_bytes": None}
+    return base_ssd_health(names, dependency_hint=smart_dependency_hint(names, attempted_tools, last_status))
+
+
+def dependency_warnings(smart_health=None, docker_state=""):
+    warnings = []
+    hint = (smart_health or {}).get("dependency_hint")
+    if hint:
+        warnings.append(f"SSD health: {hint}")
+    if docker_state == "NOT INSTALLED":
+        warnings.append(f"Docker: {missing_dependency_hint('docker')}")
+    elif docker_state.startswith("ERR:"):
+        warnings.append(f"Docker CLI returned {docker_state}; check daemon access/permissions.")
+    elif docker_state == "TIMEOUT":
+        warnings.append("Docker CLI timed out; container values may be stale or unavailable.")
+    return warnings
 
 
 def efficiency_label(eff):
@@ -1652,6 +1712,11 @@ def draw_main(stdscr):
             y += 1
         else:
             safe_addstr(stdscr,y,32,data_line,4)
+            y += 1
+        for warning in dependency_warnings(smart_health, state.docker_state):
+            if y >= maxy - 3:
+                break
+            safe_addstr(stdscr, y, 1, ("HINWEIS: " + warning)[:maxx-2], 3)
             y += 1
         y += 1
         table_start_x = 1
