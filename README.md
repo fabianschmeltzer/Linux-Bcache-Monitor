@@ -13,6 +13,11 @@ A lightweight and fast **Linux bcache monitoring tool** for real-time performanc
 - 💾 Analyze HDD + SSD hybrid setups
 - 🧠 Simple CLI interface (no dependencies)
 - 🔍 Detect IO bottlenecks
+- 🧮 Health-Score (0–100) with automatic recommendations
+- 🧾 Historical CSV samples for trend analysis
+- 🌡️ SSD SMART/NVMe health: wear, remaining life, TBW, and temperature when `smartctl` or `nvme` is available
+- ⚠️ Writeback risk view with dirty-data flush ETA
+- 📈 Prometheus text output via `--prometheus` / `--metrics`
 - 🐧 Works on all major Linux distributions
 
 ---
@@ -29,10 +34,13 @@ A lightweight and fast **Linux bcache monitoring tool** for real-time performanc
 
 This tool helps you monitor:
 
-- Cache hit ratio
+- Cache hit ratio and qualitative cache efficiency
 - IO throughput
 - Device performance
 - System bottlenecks
+- SSD cache wear, life remaining, TBW, and temperature
+- Writeback risk and estimated flush duration
+- Health score, warnings, and recommendations
 
 ---
 
@@ -46,9 +54,39 @@ curl -fsSL https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monit
 
 ---
 
+
+## 📤 Prometheus / Metrics mode
+
+Print one Prometheus-compatible metrics snapshot without starting the curses dashboard:
+
+```bash
+./bcache-monitor --prometheus
+```
+
+Example metrics include `bcache_hit_ratio`, `bcache_dirty_bytes`, `bcache_cache_available_percent`, `bcache_state`, `bcache_health_score`, `bcache_ssd_life_remaining_percent`, `bcache_ssd_temperature_celsius`, and `bcache_ssd_total_bytes_written`.
+
+## 🗂️ Historical statistics
+
+The dashboard appends CSV samples to `~/.local/share/bcache-monitor/history.csv` on periodic refresh. Override the target path with:
+
+```bash
+BCACHE_MONITOR_HISTORY_CSV=/var/lib/bcache-monitor/history.csv ./bcache-monitor
+```
+
+This history can reveal falling hit rates, growing dirty-data backlogs, or workload changes over time.
+
+## 🩺 SSD health requirements
+
+SSD/NVMe health is optional and depends on local tools and permissions:
+
+- NVMe: `nvme smart-log /dev/<cache-device>`
+- SATA/SAS SSD: `smartctl -A /dev/<cache-device>`
+
+If these tools are missing or the process lacks permission, the dashboard keeps running and displays `N/A` for the affected SSD fields.
+
 ## ℹ️ Info, credits, and legal notes
 
-- **Version:** 0.6.00
+- **Version:** 0.7.00
 - **Credits:** by Fabian Schmeltzer
 - **AI note:** This program was written with AI assistance and may contain errors. Please verify critical output and use this tool at your own risk.
 - **Bug reports:** Please submit bugs and improvement suggestions via GitHub Issues: <https://github.com/fabianschmeltzer/Linux-Bcache-Monitor/issues>
@@ -64,9 +102,11 @@ curl -fsSL https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monit
 - **H/M current/avg/peak:** Current value, window average, and peak value.
 - **MIX:** Percentage share of current bcache events. `M` is miss share, `H` is hit share. With no load, the tool shows `MIX idle` because percentages would be misleading.
 - **Δ / DELTA:** Comparison of current value with window average. If average is `0`, `n/a` is shown.
-- **HEALTH:** Traffic-light assessment from efficiency, miss/hit ratio, and miss trend.
+- **HEALTH / SCORE:** Traffic-light assessment plus a 0–100 score from efficiency, cache mode, writeback risk, dirty data, and SSD health.
 - **SSD cache / Avail WB:** Cache size and potentially available cache share for writeback, when readable from sysfs.
 - **HDD/backing:** Size of the bcache block device and, if mounted, used/free filesystem space.
+- **Flush ETA:** Estimated dirty-data drain time from dirty bytes and writeback/HDD write rate.
+- **SSD life / SSD temp / SSD TBW:** Optional SMART/NVMe cache device health values.
 - **WB target:** Background writeback rate (`writeback_rate`) reported by bcache in bytes/s. This is bcache's throttle/target rate and not necessarily identical to physical HDD I/O.
 - **WB percent / WB running:** Target share for dirty data and status indicating whether bcache background writeback is running.
 - **HDD write:** Real backing-device write rate calculated from `/sys/block/<device>/stat` between two samples. Helps show whether dirty data is actually draining to HDD.
