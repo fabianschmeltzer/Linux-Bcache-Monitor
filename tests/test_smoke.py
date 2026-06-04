@@ -34,13 +34,13 @@ def test_version_metadata_is_in_sync():
     version = (repo_root / "VERSION").read_text().strip()
     readme = (repo_root / "README.md").read_text()
 
-    assert bcache_monitor.__version__ == version == "0.7.01"
+    assert bcache_monitor.__version__ == version == "0.8.0"
     assert f"**Version:** {version}" in readme
 
 
 def test_print_version_and_exit_for_cli_flag(capsys):
     assert bcache_monitor.print_version_and_exit_if_requested(["bcache-monitor", "--version"]) is True
-    assert capsys.readouterr().out.strip() == "0.7.01"
+    assert capsys.readouterr().out.strip() == "0.8.0"
 
 
 def test_info_lines_include_bugreport_and_ai_notice():
@@ -181,3 +181,47 @@ def test_dependency_warnings_include_missing_docker_cli_and_ssd_hint():
 
     assert any("smartmontools" in warning for warning in warnings)
     assert any("Docker CLI" in warning for warning in warnings)
+
+
+def test_config_language_sanitizes_and_translates_labels():
+    cfg = bcache_monitor._sanitize_config({"language": "en", "containers": [], "bcache_device": "bcache0"})
+
+    assert cfg["language"] == "en"
+    assert bcache_monitor.tr(cfg, "settings") == "SETTINGS"
+
+
+def test_dependency_summary_includes_direct_optional_command_checks(monkeypatch):
+    monkeypatch.setattr(bcache_monitor.shutil, "which", lambda command: None)
+
+    warnings = bcache_monitor.dependency_summary_lines({}, "OK")
+
+    assert any("Docker CLI" in warning for warning in warnings)
+    assert any("nvme-cli" in warning for warning in warnings)
+    assert any("smartmontools" in warning for warning in warnings)
+
+
+def test_automatic_diagnosis_recommends_sequential_cutoff_for_low_efficiency():
+    details = {"cache_available_percent": 50, "dirty_bytes": 0, "cache_mode": "[writeback]"}
+
+    diagnosis = bcache_monitor.automatic_diagnosis([92, 88, 41], 41, 1, 10, details, {}, {})
+
+    assert diagnosis["problem"] is True
+    assert "sequential_cutoff" in diagnosis["recommendation"]
+
+
+def test_cache_size_advice_detects_oversized_cache():
+    details = {"cache_capacity": 120 * 1024 ** 3, "backing_size": 640 * 1024 ** 3}
+
+    advice = bcache_monitor.cache_size_advice(details)
+
+    assert advice["status"] == "oversized"
+    assert advice["recommended_bytes"] == 64 * 1024 ** 3
+
+
+def test_docker_top_io_calculates_largest_share():
+    rates = {"immich": (100, 900), "postgres": (0, 100)}
+
+    top = bcache_monitor.docker_top_io(rates, 1)[0]
+
+    assert top["name"] == "immich"
+    assert round(top["share_percent"]) == 91

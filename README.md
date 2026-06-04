@@ -11,8 +11,16 @@ A lightweight and fast **Linux bcache monitoring tool** for real-time performanc
 - 📊 Real-time bcache statistics
 - ⚡ Monitor SSD cache performance
 - 💾 Analyze HDD + SSD hybrid setups
-- 🧠 Simple CLI interface (no dependencies)
+- 🧠 Simple CLI interface (no Python package dependencies)
+- 🌍 German/English UI mode in settings
 - 🔍 Detect IO bottlenecks
+- 🩺 Automatic error diagnosis with likely causes and recommended action
+- 📊 Before/after performance comparison helpers for tuning changes
+- 🚨 Write-load anomaly detection
+- 🐳 Docker I/O ranking by container
+- 🍓 Raspberry Pi status helpers for UASP, I/O wait, and CPU temperature
+- 📐 Cache-size advisor and maintenance/upgrade guard
+- 🔧 Auto-tuning suggestions for cache mode, sequential cutoff, and writeback percent
 - 🧮 Health-Score (0–100) with automatic recommendations
 - 🧾 Historical CSV samples for trend analysis
 - 🌡️ SSD SMART/NVMe health: wear, remaining life, TBW, and temperature when `smartctl` or `nvme` is available
@@ -92,11 +100,19 @@ The core bcache counters are read from Linux sysfs and do not need extra Python 
 - NVMe SSD health values require `nvme` from `nvme-cli`.
 - SATA/SAS SSD health values require `smartctl` from `smartmontools`.
 
-When one of these commands is missing, fails, or times out, the dashboard keeps running and shows a yellow `HINWEIS` line explaining which dependency or permission should be checked.
+When one of these commands is missing, fails, or times out, the dashboard keeps running and shows a yellow `HINWEIS`/`NOTICE` line explaining which dependency or permission should be checked. The dependency check now also scans optional commands directly so missing tools are visible even when the related panel has no data yet.
+
+## 🌍 Language settings
+
+Open settings with `S`, switch to the language section with `Tab`, and press `Space` to toggle between German and English. The selection is saved in `~/.config/bcache-monitor/config.json`.
+
+## 🧠 Diagnostics and tuning helpers
+
+Version 0.8.0 adds reusable analysis helpers for automatic diagnosis, before/after hit-rate comparison, anomaly detection, Docker I/O ranking, Raspberry Pi status, cache-size advice, maintenance protection, lifetime prediction, and auto-tuning suggestions. The dashboard surfaces the most important diagnosis, anomaly, and maintenance messages inline while keeping Prometheus output stable.
 
 ## ℹ️ Info, credits, and legal notes
 
-- **Version:** 0.7.00
+- **Version:** 0.8.0
 - **Credits:** by Fabian Schmeltzer
 - **AI note:** This program was written with AI assistance and may contain errors. Please verify critical output and use this tool at your own risk.
 - **Bug reports:** Please submit bugs and improvement suggestions via GitHub Issues: <https://github.com/fabianschmeltzer/Linux-Bcache-Monitor/issues>
