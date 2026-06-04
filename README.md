@@ -82,7 +82,17 @@ SSD/NVMe health is optional and depends on local tools and permissions:
 - NVMe: `nvme smart-log /dev/<cache-device>`
 - SATA/SAS SSD: `smartctl -A /dev/<cache-device>`
 
-If these tools are missing or the process lacks permission, the dashboard keeps running and displays `N/A` for the affected SSD fields.
+If these tools are missing or the process lacks permission, the dashboard keeps running, displays `N/A` for the affected SSD fields, and prints an on-screen `HINWEIS` with the missing command or permission problem.
+
+## 🧰 Optional dependency hints
+
+The core bcache counters are read from Linux sysfs and do not need extra Python packages. Some extended values need local command-line tools:
+
+- Container CPU/MEM/DISK values require the Docker CLI command `docker`.
+- NVMe SSD health values require `nvme` from `nvme-cli`.
+- SATA/SAS SSD health values require `smartctl` from `smartmontools`.
+
+When one of these commands is missing, fails, or times out, the dashboard keeps running and shows a yellow `HINWEIS` line explaining which dependency or permission should be checked.
 
 ## ℹ️ Info, credits, and legal notes
 

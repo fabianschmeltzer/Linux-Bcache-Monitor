@@ -34,13 +34,13 @@ def test_version_metadata_is_in_sync():
     version = (repo_root / "VERSION").read_text().strip()
     readme = (repo_root / "README.md").read_text()
 
-    assert bcache_monitor.__version__ == version == "0.7.00"
+    assert bcache_monitor.__version__ == version == "0.7.01"
     assert f"**Version:** {version}" in readme
 
 
 def test_print_version_and_exit_for_cli_flag(capsys):
     assert bcache_monitor.print_version_and_exit_if_requested(["bcache-monitor", "--version"]) is True
-    assert capsys.readouterr().out.strip() == "0.7.00"
+    assert capsys.readouterr().out.strip() == "0.7.01"
 
 
 def test_info_lines_include_bugreport_and_ai_notice():
@@ -170,3 +170,14 @@ Temperature:                        43 Celsius
     assert health["life_remaining_percent"] == 88
     assert health["temperature_c"] == 43
     assert health["tbw_bytes"] == 512000000
+
+def test_smart_dependency_hint_recommends_nvme_cli_for_nvme_cache():
+    assert "nvme-cli" in bcache_monitor.smart_dependency_hint(["nvme0n1"], ["nvme"], "NOT INSTALLED")
+
+
+def test_dependency_warnings_include_missing_docker_cli_and_ssd_hint():
+    smart = bcache_monitor.base_ssd_health(["sda"], dependency_hint="Install smartmontools (smartctl) to show SATA/SAS SSD health values.")
+    warnings = bcache_monitor.dependency_warnings(smart, "NOT INSTALLED")
+
+    assert any("smartmontools" in warning for warning in warnings)
+    assert any("Docker CLI" in warning for warning in warnings)
