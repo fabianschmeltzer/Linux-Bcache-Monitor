@@ -44,7 +44,7 @@ def test_print_version_and_exit_for_cli_flag(capsys):
 
 
 def test_info_lines_include_bugreport_and_ai_notice():
-    lines = "\n".join(bcache_monitor.info_lines(None))
+    lines = "\n".join(bcache_monitor.info_lines({"language": "en"}))
     assert "AI assistance" in lines
     assert "Linux-Bcache-Monitor/issues" in lines
 
@@ -184,10 +184,27 @@ def test_dependency_warnings_include_missing_docker_cli_and_ssd_hint():
 
 
 def test_config_language_sanitizes_and_translates_labels():
-    cfg = bcache_monitor._sanitize_config({"language": "en", "containers": [], "bcache_device": "bcache0"})
+    cfg = bcache_monitor._sanitize_config({"language": "en", "containers": [], "bcache_device": "bcache0", "docker_enabled": False})
 
     assert cfg["language"] == "en"
+    assert cfg["docker_enabled"] is False
     assert bcache_monitor.tr(cfg, "settings") == "SETTINGS"
+    assert bcache_monitor.tr({"language": "de"}, "docker_toggle") == "Docker-Statistiken:"
+
+
+def test_docker_disabled_state_skips_container_stats():
+    state = bcache_monitor.AppState(config={"language": "de", "docker_enabled": False})
+
+    assert bcache_monitor.docker_enabled(state) is False
+    assert bcache_monitor.list_container_stats_for_state(state) == ([], "DEAKTIVIERT")
+
+
+def test_info_lines_are_localized_to_german():
+    state = bcache_monitor.AppState(config={"language": "de"})
+    lines = "\n".join(bcache_monitor.info_lines(state))
+
+    assert "KI-Hinweis" in lines
+    assert "Werte auf dem Hauptbildschirm" in lines
 
 
 def test_dependency_summary_includes_direct_optional_command_checks(monkeypatch):
