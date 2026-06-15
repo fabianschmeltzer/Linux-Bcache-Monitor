@@ -66,6 +66,7 @@ DEFAULT_CONFIG = {
     ],
     "bcache_device": "",
     "language": "de",
+    "docker_enabled": True,
 }
 CONFIG_PATH = os.path.expanduser("~/.config/bcache-monitor/config.json")
 
@@ -77,7 +78,10 @@ TRANSLATIONS = {
         "containers": "Container (Mehrfachauswahl):",
         "device": "Gerät (Einzelauswahl):",
         "language": "Sprache:",
-        "footer": "FOOTER/HOTKEYS | Q beenden | S Einstellungen | R neu laden | I Info",
+        "docker_toggle": "Docker-Statistiken:",
+        "enabled": "aktiviert",
+        "disabled": "deaktiviert",
+        "footer": "FUSSZEILE/TASTEN | Q beenden | S Einstellungen | R neu laden | I Info",
         "dependency": "HINWEIS",
         "diagnosis_title": "DIAGNOSE",
         "problem_detected": "Problem erkannt",
@@ -86,12 +90,50 @@ TRANSLATIONS = {
         "no_problem": "Keine kritischen Probleme erkannt.",
         "health": "GESUNDHEIT",
         "recommend": "EMPFEHLUNG",
+        "empty_selection": "Leere Auswahl = alle Container anzeigen",
+        "docker_disabled_state": "DEAKTIVIERT",
+        "docker_disabled_hint": "Docker-Statistiken sind in den Einstellungen deaktiviert.",
+        "config_saved": "Konfiguration gespeichert.",
+        "config_save_failed": "Konfiguration konnte nicht gespeichert werden",
+        "no_bcache_devices": "Keine bcache-Geräte gefunden.",
+        "no_containers": "Keine Container gefunden.",
+        "compact_mode": "KOMPAKTMODUS | Kernmetriken priorisiert",
+        "cache_numbers": "CACHE-WERTE",
+        "total_hits": "Treffer gesamt",
+        "total_misses": "Fehltreffer gesamt",
+        "efficiency": "Effizienz",
+        "peak_hit": "Max. Treffer/s",
+        "peak_miss": "Max. Fehltreffer/s",
+        "mode": "Modus",
+        "wb_target": "WB-Ziel",
+        "flush_eta": "Flush-Restzeit",
+        "ssd_life": "SSD-Lebensdauer",
+        "ssd_temp": "SSD-Temp",
+        "ssd_tbw": "SSD TBW",
+        "wb_percent": "WB-Prozent",
+        "hdd_write": "HDD-Schreiben",
+        "wb_running": "WB aktiv",
+        "ssd_cache": "SSD-Cache",
+        "avail_wb": "Freier WB",
+        "hdd_backing": "HDD/Backing",
+        "containers_title": "CONTAINER",
+        "selected": "ausgewählt",
+        "all_empty_selection": "ALLE (leere Auswahl)",
+        "data": "DATEN",
+        "missing": "FEHLT",
+        "not_enough_space": "Nicht genug Platz für die Container-Anzeige.",
+        "name": "NAME",
+        "ram": "RAM",
+        "disk": "DATENTRÄGER",
     },
     "en": {
         "settings": "SETTINGS",
         "containers": "Container (Multi-Select):",
         "device": "Device (Single-Select):",
         "language": "Language:",
+        "docker_toggle": "Docker statistics:",
+        "enabled": "enabled",
+        "disabled": "disabled",
         "footer": "FOOTER/HOTKEYS | Q quit | S settings | R reload | I info",
         "dependency": "NOTICE",
         "diagnosis_title": "DIAGNOSIS",
@@ -101,6 +143,41 @@ TRANSLATIONS = {
         "no_problem": "No critical problems detected.",
         "health": "HEALTH",
         "recommend": "RECOMMEND",
+        "empty_selection": "Empty selection = show ALL containers",
+        "docker_disabled_state": "DISABLED",
+        "docker_disabled_hint": "Docker statistics are disabled in settings.",
+        "config_saved": "Config saved.",
+        "config_save_failed": "Failed to save config",
+        "no_bcache_devices": "No bcache devices found.",
+        "no_containers": "No containers found.",
+        "compact_mode": "COMPACT MODE | Core metrics prioritized",
+        "cache_numbers": "CACHE NUMBERS",
+        "total_hits": "Total Hits",
+        "total_misses": "Total Misses",
+        "efficiency": "Efficiency",
+        "peak_hit": "Peak Hit/s",
+        "peak_miss": "Peak Miss/s",
+        "mode": "Mode",
+        "wb_target": "WB target",
+        "flush_eta": "Flush ETA",
+        "ssd_life": "SSD life",
+        "ssd_temp": "SSD temp",
+        "ssd_tbw": "SSD TBW",
+        "wb_percent": "WB percent",
+        "hdd_write": "HDD write",
+        "wb_running": "WB running",
+        "ssd_cache": "SSD cache",
+        "avail_wb": "Avail WB",
+        "hdd_backing": "HDD/backing",
+        "containers_title": "CONTAINERS",
+        "selected": "selected",
+        "all_empty_selection": "ALL (empty selection)",
+        "data": "DATA",
+        "missing": "MISSING",
+        "not_enough_space": "Not enough space for container display.",
+        "name": "NAME",
+        "ram": "RAM",
+        "disk": "DISK",
     },
 }
 
@@ -125,10 +202,12 @@ def check_optional_dependencies():
         })
     return results
 
-def dependency_summary_lines(smart_health=None, docker_state=""):
+def dependency_summary_lines(smart_health=None, docker_state="", include_docker=True):
     lines = dependency_warnings(smart_health, docker_state)
     seen = set(lines)
     for item in check_optional_dependencies():
+        if item["command"] == "docker" and not include_docker:
+            continue
         if not item["installed"] and item["hint"] not in seen:
             lines.append(item["hint"]); seen.add(item["hint"])
     return lines
@@ -1158,6 +1237,7 @@ def default_config():
         "containers": list(DEFAULT_CONFIG["containers"]),
         "bcache_device": DEFAULT_CONFIG["bcache_device"],
         "language": DEFAULT_CONFIG["language"],
+        "docker_enabled": DEFAULT_CONFIG["docker_enabled"],
     }
 
 
@@ -1187,6 +1267,10 @@ def _sanitize_config(raw):
     language = raw.get("language")
     if isinstance(language, str) and language.strip().lower() in ("de", "en"):
         cfg["language"] = language.strip().lower()
+
+    docker_enabled = raw.get("docker_enabled")
+    if isinstance(docker_enabled, bool):
+        cfg["docker_enabled"] = docker_enabled
 
     return cfg
 
@@ -1322,19 +1406,37 @@ def list_container_stats(selected_containers):
 
     return [], ("NO CONTAINERS" if selected_filter else "ALL (none running)")
 
+
+def docker_enabled(config_or_state):
+    config = getattr(config_or_state, "config", config_or_state) or {}
+    return bool(config.get("docker_enabled", DEFAULT_CONFIG["docker_enabled"]))
+
+
+def list_container_stats_for_state(state):
+    if not docker_enabled(state):
+        return [], tr(state, "docker_disabled_state")
+    return list_container_stats(state.selected_containers)
+
 STATS_TOTAL_PATH = None
 
 
-def _discover_stats_total_path():
+def _discover_stats_total_path(bcache_path=None):
+    if bcache_path:
+        direct = os.path.join(bcache_path, "stats_total")
+        if os.path.isdir(direct):
+            return direct
+
     for root, dirs, _ in os.walk("/sys/fs/bcache"):
         if "stats_total" in dirs:
             return os.path.join(root, "stats_total")
     return ""
 
 
-def stats():
+def stats(bcache_path=None):
     global STATS_TOTAL_PATH
-    if STATS_TOTAL_PATH is None:
+    if bcache_path:
+        STATS_TOTAL_PATH = _discover_stats_total_path(bcache_path)
+    elif STATS_TOTAL_PATH is None:
         STATS_TOTAL_PATH = _discover_stats_total_path()
 
     if not STATS_TOTAL_PATH:
@@ -1570,7 +1672,10 @@ def trend_arrow(current, baseline):
 # ---------- MAIN ----------
 
 def draw_settings(stdscr, state):
-    running, ps_state = list_running_containers()
+    if docker_enabled(state):
+        running, ps_state = list_running_containers()
+    else:
+        running, ps_state = [], tr(state, "docker_disabled_state")
     choices = sorted(set(running) | set(state.selected_containers))
     selected = set(state.selected_containers)
     device_choices = list(state.available_devices)
@@ -1582,6 +1687,7 @@ def draw_settings(stdscr, state):
     mode = "containers"
     language_idx = 0 if language_from_config(state.config) == "de" else 1
     language_choices = [("de", "Deutsch"), ("en", "English")]
+    docker_choice = docker_enabled(state)
     while True:
         stdscr.erase()
         my, mx = stdscr.getmaxyx()
@@ -1610,7 +1716,7 @@ def draw_settings(stdscr, state):
         header_lines += textwrap.wrap(nav_text, width=inner_w)[:2]
         header_lines += textwrap.wrap(f"docker ps: {ps_state}", width=inner_w)[:1]
         if not small_settings:
-            header_lines += textwrap.wrap("Empty selection = show ALL containers", width=inner_w)[:1]
+            header_lines += textwrap.wrap(tr(state, "empty_selection"), width=inner_w)[:1]
 
         cur_y = box_y + 1
         for i, line in enumerate(header_lines):
@@ -1657,7 +1763,7 @@ def draw_settings(stdscr, state):
                 prefix = ">" if mode == "device" and abs_i == dev_idx else " "
                 safe_addstr(stdscr, y, inner_x, f"{prefix} {marker} {name}"[:inner_w], 2 if mode == "device" and abs_i == dev_idx else 0)
         elif cur_y <= bottom_limit:
-            safe_addstr(stdscr, cur_y, inner_x, "No bcache devices found."[:inner_w], 1)
+            safe_addstr(stdscr, cur_y, inner_x, tr(state, "no_bcache_devices")[:inner_w], 1)
 
         if small_settings and mode == "device" and device_choices:
             hint = f"{dev_idx+1}/{len(device_choices)}"
@@ -1680,9 +1786,14 @@ def draw_settings(stdscr, state):
                 prefix = ">" if mode == "containers" and abs_i == idx else " "
                 safe_addstr(stdscr, y, inner_x, f"{prefix} {marker} {name}"[:inner_w], 2 if mode == "containers" and abs_i == idx else 0)
         elif container_start_y <= bottom_limit:
-            safe_addstr(stdscr, container_start_y, inner_x, "No containers found."[:inner_w], 1)
+            safe_addstr(stdscr, container_start_y, inner_x, tr(state, "no_containers")[:inner_w], 1)
 
         lang_y = bottom_limit - (1 if small_settings and mode in ("containers", "device") else 0)
+        docker_y = lang_y - 1
+        if docker_y > box_y and docker_y <= bottom_limit:
+            docker_line = f"{tr(state, 'docker_toggle')} [{'x' if docker_choice else ' '}] {tr(state, 'enabled') if docker_choice else tr(state, 'disabled')}"
+            safe_addstr(stdscr, docker_y, inner_x, docker_line[:inner_w], 4 if mode == "docker" else 0)
+
         if lang_y > box_y and lang_y <= bottom_limit:
             lang_line = tr(state, "language") + " " + " | ".join(("(*) " if code == language_from_config(state.config) else "( ) ") + label for code, label in language_choices)
             safe_addstr(stdscr, lang_y, inner_x, lang_line[:inner_w], 4 if mode == "language" else 0)
@@ -1695,7 +1806,7 @@ def draw_settings(stdscr, state):
         ch = stdscr.getch()
         if ch in [27, ord("q"), ord("Q")]: return
         if ch == 9:
-            order = ["containers", "device", "language"]
+            order = ["containers", "device", "docker", "language"]
             mode = order[(order.index(mode) + 1) % len(order)]
         elif ch in [curses.KEY_UP, ord("k")] and mode == "containers" and choices: idx = (idx - 1) % len(choices)
         elif ch in [curses.KEY_DOWN, ord("j")] and mode == "containers" and choices: idx = (idx + 1) % len(choices)
@@ -1707,14 +1818,18 @@ def draw_settings(stdscr, state):
         elif ch == ord(" ") and mode == "language":
             language_idx = (language_idx + 1) % len(language_choices)
             state.config["language"] = language_choices[language_idx][0]
+        elif ch == ord(" ") and mode == "docker":
+            docker_choice = not docker_choice
+            state.config["docker_enabled"] = docker_choice
         elif ch in [ord("a"), ord("A")] and mode == "containers": selected = set() if selected else set(choices)
         elif ch in [10, 13]:
             state.selected_containers = sorted(selected)
             state.config["containers"] = state.selected_containers
             state.config["bcache_device"] = selected_device
             state.config["language"] = language_choices[language_idx][0]
+            state.config["docker_enabled"] = docker_choice
             ok, msg = save_config(state.config)
-            state.config_notice = ("Config saved." if language_from_config(state.config) == "en" else "Konfiguration gespeichert.") if ok else f"Failed to save config: {msg}"
+            state.config_notice = tr(state, "config_saved") if ok else f"{tr(state, 'config_save_failed')}: {msg}"
             refresh_device_selection(state)
             return
 
@@ -1722,6 +1837,37 @@ def draw_settings(stdscr, state):
 
 def info_lines(state):
     issue_url = "https://github.com/fabianschmeltzer/Linux-Bcache-Monitor/issues"
+    if language_from_config(getattr(state, "config", state)) == "de":
+        return [
+            f"Linux Bcache Monitor v{__version__}",
+            "Credits: von Fabian Schmeltzer",
+            "KI-Hinweis: Dieses Programm wurde mit KI-Unterstützung geschrieben und kann Fehler enthalten.",
+            f"Fehler melden: {issue_url}",
+            "",
+            "Rechtlicher Hinweis (keine Rechtsberatung): Dieses Werkzeug wird ohne Gewähr bereitgestellt. Vor dem Produktionseinsatz Lizenz, Haftung und Eignung prüfen. Ohne ausdrückliche Open-Source-Lizenz gelten grundsätzlich die üblichen Urheberrechtsregeln; GitHub erlaubt öffentliche Repositories vor allem innerhalb der Plattformbedingungen anzusehen und zu forken. Für verbindliche Rechtsfragen bitte Rechtsberatung einholen.",
+            "",
+            "Werte auf dem Hauptbildschirm:",
+            "EFF: Cache-Effizienz = Treffer gesamt / (Treffer gesamt + Fehltreffer gesamt). Niedrige Werte bedeuten, dass viele Lesezugriffe die HDD statt den SSD-Cache treffen.",
+            "DIRTY: Datenmenge im Cache, die noch auf das Backing-Gerät bzw. die HDD zurückgeschrieben werden muss. Im Writeback-Modus ist das für Leistung und Ausfallrisiko wichtig.",
+            "MISS/HIT: Verhältnis aktueller Fehltreffer pro Sekunde zu Treffern pro Sekunde. Werte >= 1 zeigen, dass mehr Anfragen am Cache vorbeigehen als daraus bedient werden.",
+            "LIVE Treffer/s und Fehltreffer/s: Aktuelle Änderung der bcache-Zähler pro Sekunde. Hilfreich für Lastspitzen und Live-Diagnosen.",
+            "GRAPH: Rote Linie = Fehltreffer/s, grüne Linie = Treffer/s. Damit lassen sich kurze Spitzen und Trends schneller erkennen als über Rohwerte.",
+            "H/M aktuell/Ø/Max: aktueller Wert, Fensterdurchschnitt und Spitzenwert. Hilft beim Vergleich der Live-Werte mit der jüngsten Historie.",
+            "MIX: Anteil aktueller bcache-Ereignisse; M steht für Fehltreffer, H für Treffer. Bei 0/s Gesamtlast wird MIX idle angezeigt, weil Prozentwerte dann nicht aussagekräftig sind.",
+            "DELTA: Vergleich aktueller Werte mit dem Fensterdurchschnitt. Bei Leerlauf oder sehr kleiner Basis wird n/a angezeigt, damit irreführende Werte wie -100% vermieden werden.",
+            "GESUNDHEIT: Ampelstatus aus EFF, MISS/HIT und Fehltreffer-Trend. Das ist ein schneller Warnhinweis, ersetzt aber keine Ursachenanalyse.",
+            "CACHE-WERTE: Gesamte Treffer/Fehltreffer, Effizienz, Spitzenraten, Cache-Modus, Cache-Größe, Writeback-Zielrate, echte HDD-Schreibrate und freier Writeback-Anteil.",
+            "CONTAINER CPU/RAM/DATENTRÄGER: Docker-Statistiken. DATENTRÄGER zeigt Lese-/Schreibraten aus Docker-BlockIO-Deltas und behält die letzten Werte bis zur nächsten Docker-Abfrage.",
+            "",
+            "Zusätzliche Informationen und Grenzen:",
+            "HDD-/Backing-Größe: Wird aus /sys/block/<Gerät>/size berechnet. Belegter/freier Dateisystemplatz wird über /proc/self/mountinfo und /proc/mounts ermittelt, inklusive aufgelöster /dev/disk/by-*-Pfade.",
+            "SSD-/Cache-Größe: Wird berechnet, wenn sysfs Daten bereitstellt, über bcache cache*/bucket_size * nbuckets. Der freie Writeback-Anteil nutzt cache_available_percent.",
+            "Cache->HDD-Schreibgeschwindigkeit: WB-Ziel ist die von bcache gemeldete bzw. gedrosselte Hintergrund-Writeback-Rate. HDD-Schreiben wird zusätzlich aus /sys/block/<Gerät>/stat berechnet und liegt näher an der physischen Schreibrate.",
+            "cache_mode: writethrough/writeback/writearound/none steuert, wie bcache Lese- und Schreibzugriffe behandelt. Besonders writeback kann Dirty Data puffern.",
+            "writeback_percent/running: Zielprozentsatz für Dirty Data und Status des Hintergrund-Writebacks. Wichtig, damit Dirty Data nicht dauerhaft liegen bleibt.",
+            "",
+            "Tasten: Q beenden | S Einstellungen | R Docker neu laden | I diese Info",
+        ]
     return [
         f"Linux Bcache Monitor v{__version__}",
         "Credits: by Fabian Schmeltzer",
@@ -1796,12 +1942,13 @@ def draw_main(stdscr):
     if updated_from and updated_to:
         update_notice = f"UPDATED: {updated_from} -> {updated_to}"
 
-    ph,pm=stats()
+    config, config_notice = load_config()
+    state = AppState(config=config, config_notice=config_notice, update_notice=update_notice, selected_containers=list(config.get("containers", [])), pt=time.time())
+    refresh_device_selection(state)
+    ph,pm=stats(state.device_path)
     if ph is None or pm is None:
         ph, pm = 0, 0
-    config, config_notice = load_config()
-    state = AppState(config=config, config_notice=config_notice, update_notice=update_notice, selected_containers=list(config.get("containers", [])), ph=ph, pm=pm, pt=time.time())
-    refresh_device_selection(state)
+    state.ph, state.pm = ph, pm
 
     while True:
         stdscr.erase()
@@ -1836,7 +1983,7 @@ def draw_main(stdscr):
             time.sleep(1)
             continue
 
-        h0,m0=stats()
+        h0,m0=stats(state.device_path)
         sysfs_ok = not (h0 is None or m0 is None)
         if not sysfs_ok:
             h0, m0 = state.ph, state.pm
@@ -1965,7 +2112,7 @@ def draw_main(stdscr):
             info_y += 1
 
         if compact_mode:
-            safe_addstr(stdscr, graph_y + graph_h + 4, 1, "COMPACT MODE | Core metrics prioritized", 3)
+            safe_addstr(stdscr, graph_y + graph_h + 4, 1, tr(state, "compact_mode"), 3)
             if state.update_notice: safe_addstr(stdscr,maxy-2,1,state.update_notice,3)
             if state.config_notice: safe_addstr(stdscr,maxy-2,1,state.config_notice,3)
             elif state.device_warning: safe_addstr(stdscr,maxy-2,1,state.device_warning,3)
@@ -1981,38 +2128,38 @@ def draw_main(stdscr):
         # -------- CONTAINERS --------
         y = max(info_y + 1, graph_y + graph_h + 5)
         stats_right_x = 32 if maxx >= 100 else max(1, maxx // 2)
-        safe_addstr(stdscr,y,1,"CACHE NUMBERS",4)
+        safe_addstr(stdscr,y,1,tr(state, "cache_numbers"),4)
         y += 1
-        safe_addstr(stdscr,y,1,f"Total Hits:   {h0:,}")
-        safe_addstr(stdscr,y,stats_right_x,f"Total Misses: {m0:,}")
+        safe_addstr(stdscr,y,1,f"{tr(state, 'total_hits')}:   {h0:,}")
+        safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'total_misses')}: {m0:,}")
         y += 1
-        safe_addstr(stdscr,y,1,f"Efficiency:   {eff:6.2f}%")
+        safe_addstr(stdscr,y,1,f"{tr(state, 'efficiency')}:   {eff:6.2f}%")
         safe_addstr(stdscr,y,stats_right_x,f"Miss/Hit:     {ratio_text}")
         y += 1
-        safe_addstr(stdscr,y,1,f"Peak Hit/s:   {max_h:>6}")
-        safe_addstr(stdscr,y,stats_right_x,f"Peak Miss/s:  {max_m:>6}")
+        safe_addstr(stdscr,y,1,f"{tr(state, 'peak_hit')}:   {max_h:>6}")
+        safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'peak_miss')}:  {max_m:>6}")
         y += 1
-        safe_addstr(stdscr,y,1,f"Mode:         {format_cache_mode(details['cache_mode'])}")
-        safe_addstr(stdscr,y,stats_right_x,f"WB target:    {format_io_rate(details['writeback_rate_bytes'])}")
+        safe_addstr(stdscr,y,1,f"{tr(state, 'mode')}:         {format_cache_mode(details['cache_mode'])}")
+        safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'wb_target')}:    {format_io_rate(details['writeback_rate_bytes'])}")
         y += 1
-        safe_addstr(stdscr,y,1,f"Flush ETA:    {format_duration(flush_seconds)}")
-        safe_addstr(stdscr,y,stats_right_x,f"SSD life:     {format_pct(smart_health.get('life_remaining_percent'))}")
+        safe_addstr(stdscr,y,1,f"{tr(state, 'flush_eta')}:    {format_duration(flush_seconds)}")
+        safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'ssd_life')}:     {format_pct(smart_health.get('life_remaining_percent'))}")
         y += 1
-        safe_addstr(stdscr,y,1,f"SSD temp:     {(str(smart_health.get('temperature_c')) + ' °C') if smart_health.get('temperature_c') is not None else 'N/A'}")
-        safe_addstr(stdscr,y,stats_right_x,f"SSD TBW:      {format_bytes(smart_health.get('tbw_bytes'))}")
+        safe_addstr(stdscr,y,1,f"{tr(state, 'ssd_temp')}:     {(str(smart_health.get('temperature_c')) + ' °C') if smart_health.get('temperature_c') is not None else 'N/A'}")
+        safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'ssd_tbw')}:      {format_bytes(smart_health.get('tbw_bytes'))}")
         y += 1
-        safe_addstr(stdscr,y,1,f"WB percent:   {details['writeback_percent'] or 'N/A'}")
-        safe_addstr(stdscr,y,stats_right_x,f"HDD write:    {format_io_rate(state.backing_write_rate_bytes)}")
+        safe_addstr(stdscr,y,1,f"{tr(state, 'wb_percent')}:   {details['writeback_percent'] or 'N/A'}")
+        safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'hdd_write')}:    {format_io_rate(state.backing_write_rate_bytes)}")
         y += 1
-        safe_addstr(stdscr,y,1,f"WB running:   {details['writeback_running'] or 'N/A'}")
+        safe_addstr(stdscr,y,1,f"{tr(state, 'wb_running')}:   {details['writeback_running'] or 'N/A'}")
         y += 1
-        safe_addstr(stdscr,y,1,f"SSD cache:    {format_bytes(details['cache_capacity'])}")
-        safe_addstr(stdscr,y,stats_right_x,f"Avail WB:     {format_pct(details['cache_available_percent'])} {format_bytes(details['cache_available_bytes'])}")
+        safe_addstr(stdscr,y,1,f"{tr(state, 'ssd_cache')}:    {format_bytes(details['cache_capacity'])}")
+        safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'avail_wb')}:     {format_pct(details['cache_available_percent'])} {format_bytes(details['cache_available_bytes'])}")
         y += 1
         fs_usage = details['fs_usage']
         hdd_text = format_bytes(fs_usage['total']) if fs_usage else format_bytes(details['backing_size'])
         hdd_used = f"used {format_bytes(fs_usage['used'])} free {format_bytes(fs_usage['free'])}" if fs_usage else "used/free N/A"
-        safe_addstr(stdscr,y,1,f"HDD/backing:  {hdd_text}")
+        safe_addstr(stdscr,y,1,f"{tr(state, 'hdd_backing')}:  {hdd_text}")
         safe_addstr(stdscr,y,stats_right_x,hdd_used)
         y += 1
         if y < maxy - 5:
@@ -2031,32 +2178,35 @@ def draw_main(stdscr):
             safe_addstr(stdscr,y,1,("MAINTENANCE: " + guard["message"])[:maxx-2],2 if guard["safe"] else 3)
             y += 1
         y += 1
-        safe_addstr(stdscr,y,1,"CONTAINERS",4)
+        safe_addstr(stdscr,y,1,tr(state, "containers_title"),4)
         y+=1
 
         docker_refreshed = now - state.docker_last >= DOCKER_REFRESH_SECONDS
         if docker_refreshed:
-            state.docker_cache, state.docker_state = list_container_stats(state.selected_containers)
+            state.docker_cache, state.docker_state = list_container_stats_for_state(state)
             try:
                 append_history_sample(HISTORY_CSV_PATH, state.device_name, eff, details, smart_health, now)
             except OSError:
                 pass
             state.docker_last = now
 
-        selection_label = f"{len(state.selected_containers)} selected" if state.selected_containers else "ALL (empty selection)"
-        safe_addstr(stdscr, y, 1, f"Containers: {selection_label}", 4)
+        selection_label = f"{len(state.selected_containers)} {tr(state, 'selected')}" if state.selected_containers else tr(state, "all_empty_selection")
+        safe_addstr(stdscr, y, 1, f"{tr(state, 'containers_title')}: {selection_label}", 4)
         y += 1
-        data_line = f"DATA: SYSFS {'OK' if sysfs_ok else 'MISSING'} | DOCKER {state.docker_state}"
+        data_line = f"{tr(state, 'data')}: SYSFS {'OK' if sysfs_ok else tr(state, 'missing')} | DOCKER {state.docker_state}"
         if narrow_mode:
             safe_addstr(stdscr, y, 1, data_line, 4)
             y += 1
         else:
             safe_addstr(stdscr,y,32,data_line,4)
             y += 1
-        for warning in dependency_summary_lines(smart_health, state.docker_state):
+        for warning in dependency_summary_lines(smart_health, state.docker_state, docker_enabled(state)):
             if y >= maxy - 3:
                 break
             safe_addstr(stdscr, y, 1, (f"{tr(state, 'dependency')}: " + warning)[:maxx-2], 3)
+            y += 1
+        if not docker_enabled(state) and y < maxy - 3:
+            safe_addstr(stdscr, y, 1, (f"{tr(state, 'dependency')}: " + tr(state, "docker_disabled_hint"))[:maxx-2], 3)
             y += 1
         y += 1
         table_start_x = 1
@@ -2080,13 +2230,13 @@ def draw_main(stdscr):
         mem_x = cpu_x + cpu_col_w
         io_x = mem_x + mem_col_w
 
-        safe_addstr(stdscr, y, table_start_x, f"{'NAME':<{max(1, name_col_w-1)}}", 4)
+        safe_addstr(stdscr, y, table_start_x, f"{tr(state, 'name'):<{max(1, name_col_w-1)}}", 4)
         safe_addstr(stdscr, y, cpu_x, "CPU", 4)
-        safe_addstr(stdscr, y, mem_x, "RAM", 4)
-        safe_addstr(stdscr, y, io_x, "DISK", 4)
+        safe_addstr(stdscr, y, mem_x, tr(state, "ram"), 4)
+        safe_addstr(stdscr, y, io_x, tr(state, "disk"), 4)
         y += 1
         if (maxy - 2) - y < 1:
-            safe_addstr(stdscr, y, table_start_x, "Not enough space for container display.", 3)
+            safe_addstr(stdscr, y, table_start_x, tr(state, "not_enough_space"), 3)
         now_ts = time.time()
         current_io_totals = {}
         for name,cpu,mem,mem_usage_raw,block_io_raw in state.docker_cache:
