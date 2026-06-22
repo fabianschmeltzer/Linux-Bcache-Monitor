@@ -3,7 +3,7 @@ import curses, time, subprocess, os, sys, urllib.request, glob, json, textwrap, 
 from dataclasses import dataclass, field
 from collections import deque
 
-__version__ = "0.8.2"
+__version__ = "0.8.3"
 
 # URLs can be overridden for your publish target, e.g. GitHub raw links.
 VERSION_URL = os.environ.get("BCACHE_MONITOR_VERSION_URL", "https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monitor/main/VERSION")
@@ -126,6 +126,66 @@ TRANSLATIONS = {
         "name": "NAME",
         "ram": "RAM",
         "disk": "DATENTRÄGER",
+        "app_title": "BCACHE-MONITOR",
+        "kpi": "KENNZAHL",
+        "header": "KOPFZEILE",
+        "device_label": "GERÄT",
+        "score": "WERTUNG",
+        "dirty": "DIRTY",
+        "live_hit": "LIVE Treffer/s",
+        "live_miss": "Fehltreffer/s",
+        "source": "QUELLE",
+        "source_hint": "Konfiguration/Umgebung/Auto",
+        "graph": "DIAGRAMM",
+        "graph_compact_legend": "DIAGRAMM | rot=Fehltreffer/s grün=Treffer/s",
+        "graph_scale": "Skala",
+        "graph_latest": "letzter Nicht-Nullwert",
+        "graph_history": "Historie",
+        "graph_points_help": "Punkte: 1 Punkt = 1s | Nullwerte bleiben auf der Achse, damit keine Last vorgetäuscht wird",
+        "hm_format": "T/F-Format: aktuell/s / Durchschnitt/s / Maximum/s",
+        "window": "Fenster",
+        "buffer": "Puffer",
+        "hit_short": "T",
+        "miss_short": "F",
+        "mix_idle": "MIX Leerlauf",
+        "primary_alert": "HAUPTHINWEIS",
+        "critical_short": "krit",
+        "avg_10s": "10s-DURCHSCHNITT",
+        "vs_window": "gegen Fenster",
+        "used": "belegt",
+        "free": "frei",
+        "used_free_unavailable": "belegt/frei n/v",
+        "anomaly": "ANOMALIE",
+        "maintenance": "WARTUNG",
+        "updated": "AKTUALISIERT",
+        "info_header": "INFO | Q/Esc zurück | ↑↓ scrollen | PgUp/PgDn",
+        "no_device_env": "Kein bcache-Gerät gefunden (BCACHE_MONITOR_DEVICE setzen)",
+        "available": "Verfügbar",
+        "quit": "Q=beenden",
+        "error_no_device": "FEHLER: Kein bcache-Gerät verfügbar.",
+        "expected_device_path": "Erwartet wird ein Pfad wie /sys/block/<Gerät>/bcache.",
+        "verify_device": "Bitte prüfen, ob bcache aktiv und das Gerät angebunden ist.",
+        "not_available": "nicht verfügbar",
+        "not_available_short": "n/v",
+        "values_missing": "Fehlende Werte",
+        "sysfs_counters_missing": "bcache-Zähler nicht lesbar: stats_total/cache_hits oder cache_misses fehlt.",
+        "writeback_rate_missing": "WB-Ziel fehlt: /sys/block/<Gerät>/bcache/writeback_rate ist nicht lesbar.",
+        "writeback_percent_missing": "WB-Prozent fehlt: /sys/block/<Gerät>/bcache/writeback_percent ist nicht lesbar.",
+        "writeback_running_missing": "WB-Status fehlt: /sys/block/<Gerät>/bcache/writeback_running ist nicht lesbar.",
+        "cache_capacity_missing": "SSD-Cache-Größe fehlt: bucket_size/nbuckets oder Cache-Blockgerät ist nicht lesbar.",
+        "cache_available_missing": "Freier WB fehlt: cache_available_percent ist nicht lesbar.",
+        "backing_size_missing": "HDD/Backing-Größe fehlt: /sys/block/<Gerät>/size ist nicht lesbar.",
+        "fs_usage_missing": "Belegt/frei fehlt: kein Mountpunkt für das bcache-Gerät gefunden.",
+        "device_stat_missing": "HDD-Schreibrate fehlt: /sys/block/<Gerät>/stat ist nicht lesbar.",
+        "device_rate_waiting": "HDD-Schreibrate fehlt noch: warte auf die zweite Geräteprobe.",
+        "ssd_health_missing": "SSD-Gesundheit fehlt",
+        "docker_values_missing": "Docker-Werte fehlen",
+        "docker_io_waiting": "Docker-Datenträgerwerte fehlen noch: warte auf die zweite Docker-Abfrage.",
+        "cpu_short": "C",
+        "ram_short": "R",
+        "disk_short": "D",
+        "read_short": "L",
+        "write_short": "S",
     },
     "en": {
         "settings": "SETTINGS",
@@ -179,6 +239,66 @@ TRANSLATIONS = {
         "name": "NAME",
         "ram": "RAM",
         "disk": "DISK",
+        "app_title": "BCACHE OBSERVABILITY",
+        "kpi": "KPI",
+        "header": "HEADER",
+        "device_label": "DEVICE",
+        "score": "SCORE",
+        "dirty": "DIRTY",
+        "live_hit": "LIVE HIT/s",
+        "live_miss": "MISS/s",
+        "source": "SOURCE",
+        "source_hint": "config/env/auto",
+        "graph": "GRAPH",
+        "graph_compact_legend": "GRAPH | red=MISS/s green=HIT/s",
+        "graph_scale": "Scale",
+        "graph_latest": "latest non-zero",
+        "graph_history": "history",
+        "graph_points_help": "Points: 1 point = 1s | zero values stay on the axis to avoid fake traffic",
+        "hm_format": "H/M format: current/s / average/s / peak/s",
+        "window": "window",
+        "buffer": "buffer",
+        "hit_short": "H",
+        "miss_short": "M",
+        "mix_idle": "MIX idle",
+        "primary_alert": "PRIMARY ALERT",
+        "critical_short": "crit",
+        "avg_10s": "10s AVG",
+        "vs_window": "vs window",
+        "used": "used",
+        "free": "free",
+        "used_free_unavailable": "used/free N/A",
+        "anomaly": "ANOMALY",
+        "maintenance": "MAINTENANCE",
+        "updated": "UPDATED",
+        "info_header": "INFO | Q/Esc back | ↑↓ scroll | PgUp/PgDn",
+        "no_device_env": "No bcache device found (set BCACHE_MONITOR_DEVICE)",
+        "available": "Available",
+        "quit": "Q=quit",
+        "error_no_device": "ERROR: No bcache device available.",
+        "expected_device_path": "Expected a path like /sys/block/<device>/bcache.",
+        "verify_device": "Please verify bcache is active and the device is attached.",
+        "not_available": "not available",
+        "not_available_short": "N/A",
+        "values_missing": "Unavailable values",
+        "sysfs_counters_missing": "bcache counters unavailable: stats_total/cache_hits or cache_misses is not readable.",
+        "writeback_rate_missing": "WB target unavailable: /sys/block/<device>/bcache/writeback_rate is not readable.",
+        "writeback_percent_missing": "WB percent unavailable: /sys/block/<device>/bcache/writeback_percent is not readable.",
+        "writeback_running_missing": "WB running unavailable: /sys/block/<device>/bcache/writeback_running is not readable.",
+        "cache_capacity_missing": "SSD cache size unavailable: bucket_size/nbuckets or cache block device is not readable.",
+        "cache_available_missing": "Avail WB unavailable: cache_available_percent is not readable.",
+        "backing_size_missing": "HDD/backing size unavailable: /sys/block/<device>/size is not readable.",
+        "fs_usage_missing": "Used/free unavailable: no mount point found for the bcache device.",
+        "device_stat_missing": "HDD write unavailable: /sys/block/<device>/stat is not readable.",
+        "device_rate_waiting": "HDD write unavailable yet: waiting for the second device sample.",
+        "ssd_health_missing": "SSD health unavailable",
+        "docker_values_missing": "Docker values unavailable",
+        "docker_io_waiting": "Docker disk values unavailable yet: waiting for the second Docker sample.",
+        "cpu_short": "C",
+        "ram_short": "R",
+        "disk_short": "D",
+        "read_short": "R",
+        "write_short": "W",
     },
 }
 
@@ -190,6 +310,183 @@ def tr(config_or_state, key):
     config = getattr(config_or_state, "config", config_or_state)
     lang = language_from_config(config)
     return TRANSLATIONS.get(lang, TRANSLATIONS["de"]).get(key, TRANSLATIONS["en"].get(key, key))
+
+
+def is_german(config_or_state):
+    config = getattr(config_or_state, "config", config_or_state)
+    return language_from_config(config) == "de"
+
+
+def unavailable_value(config_or_state):
+    return tr(config_or_state, "not_available_short")
+
+
+def localize_na(config_or_state, text):
+    return unavailable_value(config_or_state) if text == "N/A" else text
+
+
+def localize_status(config_or_state, status):
+    if not is_german(config_or_state):
+        return status
+    return {
+        "HEALTHY": "GESUND",
+        "WARNING": "WARNUNG",
+        "WARN": "WARNUNG",
+        "CRITICAL": "KRITISCH",
+        "FAILURE": "AUSFALL",
+        "OK": "OK",
+    }.get(status, status)
+
+
+def localize_source(config_or_state, source):
+    if not is_german(config_or_state):
+        return source
+    return {
+        "config": "Konfig",
+        "env": "Umgebung",
+        "auto": "Auto",
+        "none": "keine",
+    }.get(source, source)
+
+
+def localize_command_status(config_or_state, status):
+    status = str(status or "")
+    if not is_german(config_or_state):
+        return status
+    if status.startswith("ERR:"):
+        return "FEHLER:" + status.split(":", 1)[1]
+    return {
+        "OK": "OK",
+        "MISSING": "FEHLT",
+        "NOT INSTALLED": "NICHT INSTALLIERT",
+        "TIMEOUT": "ZEITLIMIT",
+        "UNAVAILABLE": "NICHT VERFÜGBAR",
+        "NO CONTAINERS": "KEINE CONTAINER",
+        "ALL (none running)": "ALLE (keine laufen)",
+        "DISABLED": "DEAKTIVIERT",
+    }.get(status, status)
+
+
+def localize_message(config_or_state, message):
+    if not message or not is_german(config_or_state):
+        return message
+
+    text = str(message)
+    exact = {
+        "Install Docker CLI (docker) to show container CPU/MEM/DISK values.": "Docker CLI (docker) installieren, um Container-CPU/RAM/Datenträgerwerte anzuzeigen.",
+        "Install nvme-cli (nvme) to show NVMe SSD health values.": "nvme-cli (nvme) installieren, um NVMe-SSD-Gesundheitswerte anzuzeigen.",
+        "Install smartmontools (smartctl) to show SATA/SAS SSD health values.": "smartmontools (smartctl) installieren, um SATA/SAS-SSD-Gesundheitswerte anzuzeigen.",
+        "No cache device found for SSD health values.": "Kein Cache-Gerät für SSD-Gesundheitswerte gefunden.",
+        "Docker CLI timed out; container values may be stale or unavailable.": "Docker CLI hat das Zeitlimit erreicht; Containerwerte können veraltet oder nicht verfügbar sein.",
+        "Cache mode inactive": "Cache-Modus inaktiv",
+        "Low cache hit rate": "Niedrige Cache-Trefferrate",
+        "Cache efficiency degraded": "Cache-Effizienz verschlechtert",
+        "SSD temperature critical": "SSD-Temperatur kritisch",
+        "SSD temperature high": "SSD-Temperatur hoch",
+        "Cache SSD life below 15%": "Cache-SSD-Lebensdauer unter 15%",
+        "Cache SSD wear warning": "Warnung: Cache-SSD-Verschleiß",
+        "High writeback percent": "Hoher Writeback-Prozentsatz",
+        "Large dirty data backlog": "Großer Dirty-Data-Rückstand",
+        "No major issues detected": "Keine größeren Probleme erkannt",
+        "Cache mode is none: verify attachment and choose writethrough/writeback/writearound.": "Cache-Modus ist none: Anbindung prüfen und writethrough/writeback/writearound wählen.",
+        "Hit rate is low: check working-set size, cache_available_percent, and sequential_cutoff.": "Trefferrate ist niedrig: Working-Set-Größe, cache_available_percent und sequential_cutoff prüfen.",
+        "Hit rate is below ideal: compare recent workload with historical CSV data.": "Trefferrate ist unter Idealwert: aktuelle Last mit historischen CSV-Daten vergleichen.",
+        "Dirty data cannot be drained estimate: writeback_rate is unavailable or zero.": "Dirty-Data-Abbau kann nicht geschätzt werden: writeback_rate fehlt oder ist null.",
+        "Plan cache SSD replacement; remaining life is below 30%.": "Cache-SSD-Austausch planen; Restlebensdauer liegt unter 30%.",
+        "Improve airflow or reduce cache load; SSD temperature is elevated.": "Luftstrom verbessern oder Cache-Last senken; SSD-Temperatur ist erhöht.",
+        "No action required; continue monitoring trends.": "Keine Maßnahme nötig; Trends weiter beobachten.",
+        "No write-rate baseline yet.": "Noch keine Basislinie für die Schreibrate.",
+        "Write load is within the learned baseline.": "Schreiblast liegt innerhalb der gelernten Basislinie.",
+        "Cache-size advice needs readable cache and backing sizes.": "Cache-Größenempfehlung benötigt lesbare Cache- und Backing-Größen.",
+        "Upgrade/maintenance safe.": "Upgrade/Wartung ist unkritisch.",
+        "SSD lifetime prediction needs SMART/NVMe life data.": "SSD-Lebensdauerprognose benötigt SMART/NVMe-Lebensdauerwerte.",
+        "SSD life appears exhausted; replace immediately.": "SSD-Lebensdauer scheint erschöpft; sofort ersetzen.",
+        "Increase sequential_cutoff and compare before/after hit rate.": "sequential_cutoff erhöhen und Trefferrate vorher/nachher vergleichen.",
+        "Continue monitoring; no immediate action required.": "Weiter beobachten; keine sofortige Maßnahme nötig.",
+        "Wait for dirty data to drain before risky maintenance.": "Vor riskanter Wartung warten, bis Dirty Data zurückgeschrieben ist.",
+        "Many cache misses / possible sequential or cold workload": "Viele Cache-Fehltreffer / mögliche sequenzielle oder kalte Last",
+        "Cache SSD available writeback space is nearly full": "Verfügbarer Writeback-Bereich der Cache-SSD ist fast voll",
+        "Cache SSD temperature is high": "Cache-SSD-Temperatur ist hoch",
+        "No obvious root cause found in current snapshot": "Keine offensichtliche Ursache im aktuellen Snapshot gefunden",
+        "Config not found; defaults created.": "Konfiguration nicht gefunden; Standardwerte erstellt.",
+        "Config not readable (permissions).": "Konfiguration nicht lesbar (Berechtigungen).",
+        "Config is invalid (JSON). Using defaults.": "Konfiguration ist ungültig (JSON). Standardwerte werden verwendet.",
+        "No write permission for config.": "Keine Schreibberechtigung für die Konfiguration.",
+        "No bcache device found (expected: /sys/block/*/bcache).": "Kein bcache-Gerät gefunden (erwartet: /sys/block/*/bcache).",
+    }
+    if text in exact:
+        return exact[text]
+
+    if text.startswith("SSD health: "):
+        return "SSD-Gesundheit: " + localize_message(config_or_state, text[len("SSD health: "):])
+    if text.startswith("Docker: "):
+        return "Docker: " + localize_message(config_or_state, text[len("Docker: "):])
+    if text.startswith("Docker CLI returned "):
+        status = text[len("Docker CLI returned "):].split(";", 1)[0]
+        return f"Docker CLI meldet {localize_command_status(config_or_state, status)}; Daemon-Zugriff/Berechtigungen prüfen."
+    if text.startswith("Wait before maintenance: "):
+        details = text[len("Wait before maintenance: "):]
+        details = details.replace("dirty data present", "Dirty Data vorhanden")
+        details = details.replace("cache SSD life below 15%", "Cache-SSD-Lebensdauer unter 15%")
+        details = details.replace("cache SSD temperature critical", "Cache-SSD-Temperatur kritisch")
+        return "Vor Wartung warten: " + details
+    if text.startswith("Unusual write load: "):
+        details = text[len("Unusual write load: "):].rstrip(".")
+        details = details.replace(" vs baseline ", " gegenüber Basislinie ")
+        return "Ungewöhnliche Schreiblast: " + details + "."
+    if text.startswith("Cache may be oversized: "):
+        return text.replace("Cache may be oversized:", "Cache ist möglicherweise zu groß:").replace(" current", " aktuell").replace(" recommended", " empfohlen").replace(" potential saving", " mögliches Einsparpotenzial")
+    if text.startswith("Cache may be too small: "):
+        return text.replace("Cache may be too small:", "Cache ist möglicherweise zu klein:").replace(" current", " aktuell").replace(" recommended", " empfohlen")
+    if text.startswith("Cache size looks balanced "):
+        return text.replace("Cache size looks balanced", "Cache-Größe wirkt ausgewogen")
+    if text.startswith("Estimated remaining SSD lifetime: about "):
+        return text.replace("Estimated remaining SSD lifetime: about ", "Geschätzte restliche SSD-Lebensdauer: etwa ").replace(" years (trend estimate, verify with SMART history).", " Jahre (Trendschätzung, mit SMART-Historie prüfen).")
+    if text.startswith("Container ") and " causes " in text and " of visible container I/O" in text:
+        return text.replace(" causes ", " verursacht ").replace(" of visible container I/O", " der sichtbaren Container-I/O")
+    if text.startswith("Saved device '"):
+        return text.replace("Saved device", "Gespeichertes Gerät").replace("not found; automatic fallback enabled.", "nicht gefunden; automatischer Fallback aktiv.")
+    if text.startswith("Env device '"):
+        return text.replace("Env device", "Umgebungsgerät").replace("not found; automatic fallback enabled.", "nicht gefunden; automatischer Fallback aktiv.")
+    if text.startswith("Config missing ("):
+        return text.replace("Config missing", "Konfiguration fehlt")
+    if "No write permission for config." in text:
+        return text.replace("No write permission for config.", "Keine Schreibberechtigung für die Konfiguration.")
+    if text.startswith("Config read failed:"):
+        return text.replace("Config read failed:", "Konfiguration konnte nicht gelesen werden:")
+    if " timed out while reading SSD health values." in text:
+        return text.replace(" timed out while reading SSD health values.", " hat beim Lesen der SSD-Gesundheitswerte das Zeitlimit erreicht.")
+    if " is installed but returned " in text:
+        return text.replace(" is installed but returned ", " ist installiert, meldet aber ").replace("; run as root or adjust device permissions.", "; als root ausführen oder Geräteberechtigungen anpassen.")
+    if text.startswith("SSD health unavailable; verify "):
+        return text.replace("SSD health unavailable; verify ", "SSD-Gesundheit nicht verfügbar; ").replace(" access and device support.", "-Zugriff und Geräteunterstützung prüfen.")
+    return text
+
+
+def localize_reason(config_or_state, reason):
+    if not is_german(config_or_state):
+        return reason
+    text = str(reason or "")
+    text = text.replace("historical", "historisch")
+    text = text.replace("miss trend", "Fehltreffer-Trend")
+    text = text.replace("miss/hit", "Fehltreffer/Treffer")
+    text = text.replace("idle", "Leerlauf")
+    text = text.replace("stable", "stabil")
+    text = text.replace("eff ", "Eff ")
+    return text
+
+
+def efficiency_label_for_display(config_or_state, eff):
+    if is_german(config_or_state):
+        return efficiency_label(eff)
+    if eff >= 90:
+        return "Excellent"
+    if eff >= 80:
+        return "Good"
+    if eff >= 50:
+        return "Warning"
+    return "Cache barely helps"
+
 
 def check_optional_dependencies():
     results = []
@@ -203,14 +500,17 @@ def check_optional_dependencies():
         })
     return results
 
-def dependency_summary_lines(smart_health=None, docker_state="", include_docker=True):
-    lines = dependency_warnings(smart_health, docker_state)
+def dependency_summary_lines(smart_health=None, docker_state="", include_docker=True, config_or_state=None):
+    lines = dependency_warnings(smart_health, docker_state, config_or_state)
     seen = set(lines)
     for item in check_optional_dependencies():
         if item["command"] == "docker" and not include_docker:
             continue
-        if not item["installed"] and item["hint"] not in seen:
-            lines.append(item["hint"]); seen.add(item["hint"])
+        if item["command"] == "docker" and docker_state == "NOT INSTALLED":
+            continue
+        hint = missing_dependency_hint(item["command"], config_or_state)
+        if not item["installed"] and hint not in seen:
+            lines.append(hint); seen.add(hint)
     return lines
 
 # ---------- SAFE DRAW ----------
@@ -775,8 +1075,9 @@ def parse_smart_health_text(stdout):
     return health
 
 
-def missing_dependency_hint(command_name):
-    return DEPENDENCY_INSTALL_HINTS.get(command_name, f"Install '{command_name}' to enable related values.")
+def missing_dependency_hint(command_name, config_or_state=None):
+    hint = DEPENDENCY_INSTALL_HINTS.get(command_name, f"Install '{command_name}' to enable related values.")
+    return localize_message(config_or_state, hint) if config_or_state is not None else hint
 
 
 def smart_dependency_hint(cache_device_names, attempted_tools=None, last_status=""):
@@ -832,17 +1133,19 @@ def read_ssd_health(cache_device_names):
     return base_ssd_health(names, dependency_hint=smart_dependency_hint(names, attempted_tools, last_status))
 
 
-def dependency_warnings(smart_health=None, docker_state=""):
+def dependency_warnings(smart_health=None, docker_state="", config_or_state=None):
     warnings = []
     hint = (smart_health or {}).get("dependency_hint")
     if hint:
-        warnings.append(f"SSD health: {hint}")
+        warnings.append(localize_message(config_or_state, f"SSD health: {hint}") if config_or_state is not None else f"SSD health: {hint}")
     if docker_state == "NOT INSTALLED":
-        warnings.append(f"Docker: {missing_dependency_hint('docker')}")
+        warnings.append(localize_message(config_or_state, f"Docker: {missing_dependency_hint('docker', config_or_state)}") if config_or_state is not None else f"Docker: {missing_dependency_hint('docker')}")
     elif docker_state.startswith("ERR:"):
-        warnings.append(f"Docker CLI returned {docker_state}; check daemon access/permissions.")
+        warning = f"Docker CLI returned {docker_state}; check daemon access/permissions."
+        warnings.append(localize_message(config_or_state, warning) if config_or_state is not None else warning)
     elif docker_state == "TIMEOUT":
-        warnings.append("Docker CLI timed out; container values may be stale or unavailable.")
+        warning = "Docker CLI timed out; container values may be stale or unavailable."
+        warnings.append(localize_message(config_or_state, warning) if config_or_state is not None else warning)
     return warnings
 
 
@@ -1176,6 +1479,30 @@ def format_pct(value):
     return "N/A" if value is None else f"{value:.1f}%"
 
 
+def format_io_rate_display(config_or_state, value):
+    return unavailable_value(config_or_state) if value is None or value < 0 else format_io_rate(value)
+
+
+def format_bytes_display(config_or_state, value):
+    return unavailable_value(config_or_state) if value is None else format_bytes(value)
+
+
+def format_pct_display(config_or_state, value):
+    return unavailable_value(config_or_state) if value is None else format_pct(value)
+
+
+def format_duration_display(config_or_state, seconds):
+    return unavailable_value(config_or_state) if seconds is None else format_duration(seconds)
+
+
+def format_cache_mode_display(config_or_state, cache_mode_raw):
+    return localize_na(config_or_state, format_cache_mode(cache_mode_raw))
+
+
+def value_or_unavailable(config_or_state, value):
+    return value if value not in (None, "") else unavailable_value(config_or_state)
+
+
 def format_cache_mode(cache_mode_raw):
     if not cache_mode_raw:
         return "N/A"
@@ -1200,6 +1527,11 @@ def format_delta_pct_for_display(current, baseline):
     if current <= 0 and baseline <= MIN_DELTA_BASELINE_PS:
         return "n/a"
     return format_delta_pct(current, baseline, MIN_DELTA_BASELINE_PS)
+
+
+def format_delta_pct_display(config_or_state, current, baseline):
+    text = format_delta_pct_for_display(current, baseline)
+    return unavailable_value(config_or_state) if is_german(config_or_state) and text == "n/a" else text
 
 def list_bcache_devices():
     candidates = []
@@ -1432,6 +1764,54 @@ def list_container_stats_for_state(state):
     if not docker_enabled(state):
         return [], tr(state, "docker_disabled_state")
     return list_container_stats(state.selected_containers)
+
+
+def missing_value_reasons(config_or_state, details=None, smart_health=None, state=None, sysfs_ok=True):
+    details = details or {}
+    reasons = []
+
+    def add(reason):
+        if reason and reason not in reasons:
+            reasons.append(reason)
+
+    if not sysfs_ok:
+        add(tr(config_or_state, "sysfs_counters_missing"))
+    if details.get("writeback_rate_bytes") is None:
+        add(tr(config_or_state, "writeback_rate_missing"))
+    if details.get("writeback_percent") is None:
+        add(tr(config_or_state, "writeback_percent_missing"))
+    if details.get("writeback_running") is None:
+        add(tr(config_or_state, "writeback_running_missing"))
+    if details.get("cache_capacity") is None:
+        add(tr(config_or_state, "cache_capacity_missing"))
+    if details.get("cache_available_percent") is None:
+        add(tr(config_or_state, "cache_available_missing"))
+    if details.get("backing_size") is None:
+        add(tr(config_or_state, "backing_size_missing"))
+    if details.get("fs_usage") is None:
+        add(tr(config_or_state, "fs_usage_missing"))
+    if details.get("device_stat") is None:
+        add(tr(config_or_state, "device_stat_missing"))
+    elif state is not None and state.backing_write_rate_bytes is None:
+        add(tr(config_or_state, "device_rate_waiting"))
+
+    smart = smart_health or {}
+    if smart and all(smart.get(key) is None for key in ("life_remaining_percent", "temperature_c", "tbw_bytes")):
+        hint = smart.get("dependency_hint")
+        suffix = f": {localize_message(config_or_state, hint)}" if hint else ""
+        add(tr(config_or_state, "ssd_health_missing") + suffix)
+
+    if state is not None:
+        docker_state = state.docker_state
+        if not docker_enabled(state):
+            pass
+        elif docker_state != "OK":
+            add(tr(config_or_state, "docker_values_missing") + f": {localize_command_status(config_or_state, docker_state)}")
+        elif state.docker_cache and not state.docker_io_rates:
+            add(tr(config_or_state, "docker_io_waiting"))
+
+    return reasons
+
 
 STATS_TOTAL_PATH = None
 
@@ -1817,7 +2197,7 @@ def draw_settings(stdscr, state):
             safe_addstr(stdscr, lang_y, inner_x, lang_line[:inner_w], 4 if mode == "language" else 0)
 
         if small_settings and mode == "containers" and choices:
-            hint = f"{idx+1}/{len(choices)} | a=alle"
+            hint = f"{idx+1}/{len(choices)} | a={'all' if language_from_config(state.config) == 'en' else 'alle'}"
             safe_addstr(stdscr, bottom_limit, inner_x, hint[:inner_w], 4)
 
         stdscr.refresh()
@@ -1858,7 +2238,7 @@ def info_lines(state):
     if language_from_config(getattr(state, "config", state)) == "de":
         return [
             f"Linux Bcache Monitor v{__version__}",
-            "Credits: von Fabian Schmeltzer",
+            "Mitwirkende: Fabian Schmeltzer",
             "KI-Hinweis: Dieses Programm wurde mit KI-Unterstützung geschrieben und kann Fehler enthalten.",
             f"Fehler melden: {issue_url}",
             "",
@@ -1867,12 +2247,12 @@ def info_lines(state):
             "Werte auf dem Hauptbildschirm:",
             "EFF: Cache-Effizienz = Treffer gesamt / (Treffer gesamt + Fehltreffer gesamt). Niedrige Werte bedeuten, dass viele Lesezugriffe die HDD statt den SSD-Cache treffen.",
             "DIRTY: Datenmenge im Cache, die noch auf das Backing-Gerät bzw. die HDD zurückgeschrieben werden muss. Im Writeback-Modus ist das für Leistung und Ausfallrisiko wichtig.",
-            "MISS/HIT: Verhältnis aktueller Fehltreffer pro Sekunde zu Treffern pro Sekunde. Werte >= 1 zeigen, dass mehr Anfragen am Cache vorbeigehen als daraus bedient werden.",
-            "LIVE Treffer/s und Fehltreffer/s: Aktuelle Änderung der bcache-Zähler pro Sekunde. Hilfreich für Lastspitzen und Live-Diagnosen.",
-            "GRAPH: Rote Linie = Fehltreffer/s, grüne Linie = Treffer/s. Damit lassen sich kurze Spitzen und Trends schneller erkennen als über Rohwerte.",
-            "H/M aktuell/Ø/Max: aktueller Wert, Fensterdurchschnitt und Spitzenwert. Hilft beim Vergleich der Live-Werte mit der jüngsten Historie.",
-            "MIX: Anteil aktueller bcache-Ereignisse; M steht für Fehltreffer, H für Treffer. Bei 0/s Gesamtlast wird MIX idle angezeigt, weil Prozentwerte dann nicht aussagekräftig sind.",
-            "DELTA: Vergleich aktueller Werte mit dem Fensterdurchschnitt. Bei Leerlauf oder sehr kleiner Basis wird n/a angezeigt, damit irreführende Werte wie -100% vermieden werden.",
+            "FEHLTREFFER/TREFFER: Verhältnis aktueller Fehltreffer pro Sekunde zu Treffern pro Sekunde. Werte >= 1 zeigen, dass mehr Anfragen am Cache vorbeigehen als daraus bedient werden.",
+            "Live Treffer/s und Fehltreffer/s: Aktuelle Änderung der bcache-Zähler pro Sekunde. Hilfreich für Lastspitzen und Live-Diagnosen.",
+            "DIAGRAMM: Rote Linie = Fehltreffer/s, grüne Linie = Treffer/s. Damit lassen sich kurze Spitzen und Trends schneller erkennen als über Rohwerte.",
+            "T/F aktuell/Ø/Max: aktueller Treffer- bzw. Fehltrefferwert, Fensterdurchschnitt und Spitzenwert. Hilft beim Vergleich der Live-Werte mit der jüngsten Historie.",
+            "MIX: Anteil aktueller bcache-Ereignisse; F steht für Fehltreffer, T für Treffer. Bei 0/s Gesamtlast wird MIX Leerlauf angezeigt, weil Prozentwerte dann nicht aussagekräftig sind.",
+            "ABWEICHUNG: Vergleich aktueller Werte mit dem Fensterdurchschnitt. Bei Leerlauf oder sehr kleiner Basis wird n/v angezeigt, damit irreführende Werte wie -100% vermieden werden.",
             "GESUNDHEIT: Ampelstatus aus EFF, MISS/HIT und Fehltreffer-Trend. Das ist ein schneller Warnhinweis, ersetzt aber keine Ursachenanalyse.",
             "CACHE-WERTE: Gesamte Treffer/Fehltreffer, Effizienz, Spitzenraten, Cache-Modus, Cache-Größe, Writeback-Zielrate, echte HDD-Schreibrate und freier Writeback-Anteil.",
             "CONTAINER CPU/RAM/DATENTRÄGER: Docker-Statistiken. DATENTRÄGER zeigt den Durchschnitt der Lese-/Schreibraten aus Docker-BlockIO-Deltas über das jüngste Zeitfenster.",
@@ -1923,7 +2303,7 @@ def draw_info(stdscr, state):
     while True:
         stdscr.erase()
         maxy, maxx = stdscr.getmaxyx()
-        safe_addstr(stdscr, 0, 1, "INFO | Q/Esc back | ↑↓ scroll | PgUp/PgDn", 4)
+        safe_addstr(stdscr, 0, 1, tr(state, "info_header"), 4)
         width = max(20, maxx - 4)
         wrapped = []
         for line in info_lines(state):
@@ -1954,13 +2334,13 @@ def draw_main(stdscr):
     curses.curs_set(0)
     stdscr.nodelay(True)
 
+    config, config_notice = load_config()
     update_notice = ""
     updated_from = os.environ.get("BCACHE_MONITOR_UPDATED_FROM", "").strip()
     updated_to = os.environ.get("BCACHE_MONITOR_UPDATED_TO", "").strip()
     if updated_from and updated_to:
-        update_notice = f"UPDATED: {updated_from} -> {updated_to}"
+        update_notice = f"{tr(config, 'updated')}: {updated_from} -> {updated_to}"
 
-    config, config_notice = load_config()
     state = AppState(config=config, config_notice=config_notice, update_notice=update_notice, selected_containers=list(config.get("containers", [])), pt=time.time())
     refresh_device_selection(state)
     ph,pm=stats(state.device_path)
@@ -1974,10 +2354,10 @@ def draw_main(stdscr):
 
         refresh_device_selection(state)
         if not state.device_path:
-            safe_addstr(stdscr, 0, 0, "No bcache device found (set BCACHE_MONITOR_DEVICE)", 1)
+            safe_addstr(stdscr, 0, 0, tr(state, "no_device_env"), 1)
             if state.available_devices:
-                safe_addstr(stdscr, 1, 0, f"Available: {', '.join(state.available_devices)}", 3)
-            safe_addstr(stdscr, 2, 0, "Q=quit")
+                safe_addstr(stdscr, 1, 0, f"{tr(state, 'available')}: {', '.join(state.available_devices)}", 3)
+            safe_addstr(stdscr, 2, 0, tr(state, "quit"))
             stdscr.refresh()
             if stdscr.getch() in [ord('q'),ord('Q')]:
                 break
@@ -1990,11 +2370,11 @@ def draw_main(stdscr):
 
         # DATA
         if not state.device_path:
-            safe_addstr(stdscr,0,1,f"BCACHE OBSERVABILITY v{__version__}",4)
-            safe_addstr(stdscr,2,1,"ERROR: No bcache device available.",1)
-            safe_addstr(stdscr,3,1,"Expected a path like /sys/block/<device>/bcache.",3)
-            safe_addstr(stdscr,4,1,"Please verify bcache is active and the device is attached.",3)
-            safe_addstr(stdscr,maxy-1,1,"Q=quit")
+            safe_addstr(stdscr,0,1,f"{tr(state, 'app_title')} v{__version__}",4)
+            safe_addstr(stdscr,2,1,tr(state, "error_no_device"),1)
+            safe_addstr(stdscr,3,1,tr(state, "expected_device_path"),3)
+            safe_addstr(stdscr,4,1,tr(state, "verify_device"),3)
+            safe_addstr(stdscr,maxy-1,1,tr(state, "quit"))
             stdscr.refresh()
             if stdscr.getch() in [ord('q'),ord('Q')]:
                 break
@@ -2032,18 +2412,18 @@ def draw_main(stdscr):
             state.backing_write_rate_bytes = avg_backing_write_rate
             state.backing_write_history.append(avg_backing_write_rate)
         dirty_bytes = details["dirty_bytes"]
-        dirty_display=format_dirty_value(dirty_bytes)
+        dirty_display=format_bytes_display(state, dirty_bytes)
 
         # -------- HEADER --------
-        safe_addstr(stdscr,0,1,f"HEADER | BCACHE OBSERVABILITY v{__version__} | DEVICE {state.device_name or 'N/A'}",6)
+        safe_addstr(stdscr,0,1,f"{tr(state, 'header')} | {tr(state, 'app_title')} v{__version__} | {tr(state, 'device_label')} {state.device_name or unavailable_value(state)}",6)
 
         # -------- KPI BLOCK --------
         ratio = (mps / hps) if hps > 0 else (float("inf") if mps > 0 else 0.0)
         ratio_text = "∞" if ratio == float("inf") else f"{ratio:.2f}"
-        safe_addstr(stdscr,2,1,f"KPI   | SCORE {report['score']:3d}/100 {report['status']}   EFF {eff:.1f}% ({efficiency_label(eff)})   DIRTY {dirty_display}", 2 if report["score"] >= 80 else (3 if report["score"] >= 50 else 1))
-        source_text = f"KPI   | LIVE HIT/s {hps}   MISS/s {mps}   SOURCE {state.device_source}"
+        safe_addstr(stdscr,2,1,f"{tr(state, 'kpi')}   | {tr(state, 'score')} {report['score']:3d}/100 {localize_status(state, report['status'])}   EFF {eff:.1f}% ({efficiency_label_for_display(state, eff)})   {tr(state, 'dirty')} {dirty_display}", 2 if report["score"] >= 80 else (3 if report["score"] >= 50 else 1))
+        source_text = f"{tr(state, 'kpi')}   | {tr(state, 'live_hit')} {hps}   {tr(state, 'live_miss')} {mps}   {tr(state, 'source')} {localize_source(state, state.device_source)}"
         if maxx >= 96:
-            source_text += " (config/env/auto)"
+            source_text += f" ({tr(state, 'source_hint')})"
         safe_addstr(stdscr,3,1,source_text)
 
         # -------- GRAPH --------
@@ -2077,12 +2457,12 @@ def draw_main(stdscr):
         draw_line_graph(stdscr, state.miss, graph_y, graph_x, graph_w, graph_h, 1, maxv)
         draw_line_graph(stdscr, state.hits, graph_y, graph_x, graph_w, graph_h, 2, maxv)
         if compact_mode:
-            graph_legend = "GRAPH | red=MISS/s green=HIT/s"
+            graph_legend = tr(state, "graph_compact_legend")
         else:
-            graph_legend = f"GRAPH | red=MISS/s | green=HIT/s | Scale {maxv}/s | ◆ latest non-zero | • history"
+            graph_legend = f"{tr(state, 'graph')} | rot=Fehltreffer/s | grün=Treffer/s | {tr(state, 'graph_scale')} {maxv}/s | ◆ {tr(state, 'graph_latest')} | • {tr(state, 'graph_history')}" if is_german(state) else f"{tr(state, 'graph')} | red=MISS/s | green=HIT/s | {tr(state, 'graph_scale')} {maxv}/s | ◆ {tr(state, 'graph_latest')} | • {tr(state, 'graph_history')}"
         safe_addstr(stdscr, graph_y - 1, graph_x, graph_legend, 6)
         info_y = graph_y + graph_h + 1
-        point_help = "Points: 1 point = 1s | zero values stay on the axis to avoid fake traffic"
+        point_help = tr(state, "graph_points_help")
         safe_addstr(stdscr, info_y, graph_x, point_help, 6)
         info_y += 1
 
@@ -2092,11 +2472,11 @@ def draw_main(stdscr):
         max_m = max(state.miss) if state.miss else 0
         miss_share = (mps / (hps + mps) * 100.0) if (hps + mps) > 0 else 0.0
         # Legend for values: current / average / peak
-        h_part = f"H {hps:>4}/{avg_h:>4.0f}/{max_h:>4}"
-        m_part = f"M {mps:>4}/{avg_m:>4.0f}/{max_m:>4}"
+        h_part = f"{tr(state, 'hit_short')} {hps:>4}/{avg_h:>4.0f}/{max_h:>4}"
+        m_part = f"{tr(state, 'miss_short')} {mps:>4}/{avg_m:>4.0f}/{max_m:>4}"
         hit_share = (hps / (hps + mps) * 100.0) if (hps + mps) > 0 else 0.0
-        mix_part = f"MIX M:{miss_share:>5.1f}% H:{hit_share:>5.1f}%" if (hps + mps) > 0 else "MIX idle"
-        delta_part = f"Δ M:{format_delta_pct_for_display(mps, avg_m)} H:{format_delta_pct_for_display(hps, avg_h)}"
+        mix_part = f"MIX {tr(state, 'miss_short')}:{miss_share:>5.1f}% {tr(state, 'hit_short')}:{hit_share:>5.1f}%" if (hps + mps) > 0 else tr(state, "mix_idle")
+        delta_part = f"Δ {tr(state, 'miss_short')}:{format_delta_pct_display(state, mps, avg_m)} {tr(state, 'hit_short')}:{format_delta_pct_display(state, hps, avg_h)}"
         safe_addstr(stdscr, info_y, graph_x, h_part, 2)
         x_off = graph_x + len(h_part)
         safe_addstr(stdscr, info_y, x_off, " | ", 6)
@@ -2105,20 +2485,21 @@ def draw_main(stdscr):
         x_off += len(m_part)
         safe_addstr(stdscr, info_y, x_off, f" | {mix_part} | {delta_part}", 6)
         info_y += 1
-        safe_addstr(stdscr, info_y, graph_x, "H/M format: current/s / average/s / peak/s", 6)
+        safe_addstr(stdscr, info_y, graph_x, tr(state, "hm_format"), 6)
         info_y += 1
         if not tiny_mode:
-            safe_addstr(stdscr, info_y, graph_x, f"window {min(len(state.hits), graph_w)}s (buffer {HISTORY}s)", 6)
+            safe_addstr(stdscr, info_y, graph_x, f"{tr(state, 'window')} {min(len(state.hits), graph_w)}s ({tr(state, 'buffer')} {HISTORY}s)", 6)
             info_y += 1
 
         # -------- STATUS --------
         status,color,reason=status_from_metrics(eff,hps,mps,state.miss_trend)
-        safe_addstr(stdscr, info_y, 1, f"HEALTH | SCORE {report['score']}/100 {report['status']} | PRIMARY ALERT: {status} ({reason})", color)
+        safe_addstr(stdscr, info_y, 1, f"{tr(state, 'health')} | {tr(state, 'score')} {report['score']}/100 {localize_status(state, report['status'])} | {tr(state, 'primary_alert')}: {localize_status(state, status)} ({localize_reason(state, reason)})", color)
         info_y += 1
         eff_arrow = trend_arrow(eff, eff_baseline) if eff_baseline is not None else "→"
         ratio_arrow = trend_arrow(mps, avg_m)
         if not tiny_mode:
-            health_text = f"HEALTH | EFF {eff:.1f}%{eff_arrow} crit<{EFF_CRITICAL_THRESHOLD:.0f} | MISS/HIT {ratio_text}{ratio_arrow} crit≥{MISS_HIT_RATIO_CRITICAL:.2f}"
+            miss_hit_label = "Fehltreffer/Treffer" if is_german(state) else "MISS/HIT"
+            health_text = f"{tr(state, 'health')} | EFF {eff:.1f}%{eff_arrow} {tr(state, 'critical_short')}<{EFF_CRITICAL_THRESHOLD:.0f} | {miss_hit_label} {ratio_text}{ratio_arrow} {tr(state, 'critical_short')}≥{MISS_HIT_RATIO_CRITICAL:.2f}"
             safe_addstr(stdscr, info_y, 1, health_text, color)
             info_y += 1
         if len(state.hits) >= 10 and len(state.miss) >= 10:
@@ -2128,14 +2509,14 @@ def draw_main(stdscr):
             short_h = avg_h
             short_m = avg_m
         if not compact_mode:
-            safe_addstr(stdscr, info_y, 1, f"10s AVG -> H:{short_h:.0f}/s  M:{short_m:.0f}/s  ΔMISS:{format_delta_pct_for_display(short_m, avg_m)} vs window", 4)
+            safe_addstr(stdscr, info_y, 1, f"{tr(state, 'avg_10s')} -> {tr(state, 'hit_short')}:{short_h:.0f}/s  {tr(state, 'miss_short')}:{short_m:.0f}/s  Δ{tr(state, 'miss_short')}:{format_delta_pct_display(state, short_m, avg_m)} {tr(state, 'vs_window')}", 4)
             info_y += 1
 
         if compact_mode:
             safe_addstr(stdscr, graph_y + graph_h + 4, 1, tr(state, "compact_mode"), 3)
             if state.update_notice: safe_addstr(stdscr,maxy-2,1,state.update_notice,3)
-            if state.config_notice: safe_addstr(stdscr,maxy-2,1,state.config_notice,3)
-            elif state.device_warning: safe_addstr(stdscr,maxy-2,1,state.device_warning,3)
+            if state.config_notice: safe_addstr(stdscr,maxy-2,1,localize_message(state, state.config_notice),3)
+            elif state.device_warning: safe_addstr(stdscr,maxy-2,1,localize_message(state, state.device_warning),3)
             safe_addstr(stdscr,maxy-1,1,tr(state, "footer"),4)
             stdscr.refresh()
             action = handle_keypress(stdscr.getch(), state)
@@ -2154,48 +2535,49 @@ def draw_main(stdscr):
         safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'total_misses')}: {m0:,}")
         y += 1
         safe_addstr(stdscr,y,1,f"{tr(state, 'efficiency')}:   {eff:6.2f}%")
-        safe_addstr(stdscr,y,stats_right_x,f"Miss/Hit:     {ratio_text}")
+        safe_addstr(stdscr,y,stats_right_x,f"{('Fehlt./Treff.' if is_german(state) else 'Miss/Hit')}:     {ratio_text}")
         y += 1
         safe_addstr(stdscr,y,1,f"{tr(state, 'peak_hit')}:   {max_h:>6}")
         safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'peak_miss')}:  {max_m:>6}")
         y += 1
-        safe_addstr(stdscr,y,1,f"{tr(state, 'mode')}:         {format_cache_mode(details['cache_mode'])}")
-        safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'wb_target')}:    {format_io_rate(details['writeback_rate_bytes'])}")
+        safe_addstr(stdscr,y,1,f"{tr(state, 'mode')}:         {format_cache_mode_display(state, details['cache_mode'])}")
+        safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'wb_target')}:    {format_io_rate_display(state, details['writeback_rate_bytes'])}")
         y += 1
-        safe_addstr(stdscr,y,1,f"{tr(state, 'flush_eta')}:    {format_duration(flush_seconds)}")
-        safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'ssd_life')}:     {format_pct(smart_health.get('life_remaining_percent'))}")
+        safe_addstr(stdscr,y,1,f"{tr(state, 'flush_eta')}:    {format_duration_display(state, flush_seconds)}")
+        safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'ssd_life')}:     {format_pct_display(state, smart_health.get('life_remaining_percent'))}")
         y += 1
-        safe_addstr(stdscr,y,1,f"{tr(state, 'ssd_temp')}:     {(str(smart_health.get('temperature_c')) + ' °C') if smart_health.get('temperature_c') is not None else 'N/A'}")
-        safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'ssd_tbw')}:      {format_bytes(smart_health.get('tbw_bytes'))}")
+        safe_addstr(stdscr,y,1,f"{tr(state, 'ssd_temp')}:     {(str(smart_health.get('temperature_c')) + ' °C') if smart_health.get('temperature_c') is not None else unavailable_value(state)}")
+        safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'ssd_tbw')}:      {format_bytes_display(state, smart_health.get('tbw_bytes'))}")
         y += 1
-        safe_addstr(stdscr,y,1,f"{tr(state, 'wb_percent')}:   {details['writeback_percent'] or 'N/A'}")
-        safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'hdd_write')}:    {format_io_rate(state.backing_write_rate_bytes)}")
+        safe_addstr(stdscr,y,1,f"{tr(state, 'wb_percent')}:   {value_or_unavailable(state, details['writeback_percent'])}")
+        safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'hdd_write')}:    {format_io_rate_display(state, state.backing_write_rate_bytes)}")
         y += 1
-        safe_addstr(stdscr,y,1,f"{tr(state, 'wb_running')}:   {details['writeback_running'] or 'N/A'}")
+        safe_addstr(stdscr,y,1,f"{tr(state, 'wb_running')}:   {value_or_unavailable(state, details['writeback_running'])}")
         y += 1
-        safe_addstr(stdscr,y,1,f"{tr(state, 'ssd_cache')}:    {format_bytes(details['cache_capacity'])}")
-        safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'avail_wb')}:     {format_pct(details['cache_available_percent'])} {format_bytes(details['cache_available_bytes'])}")
+        safe_addstr(stdscr,y,1,f"{tr(state, 'ssd_cache')}:    {format_bytes_display(state, details['cache_capacity'])}")
+        safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'avail_wb')}:     {format_pct_display(state, details['cache_available_percent'])} {format_bytes_display(state, details['cache_available_bytes'])}")
         y += 1
         fs_usage = details['fs_usage']
-        hdd_text = format_bytes(fs_usage['total']) if fs_usage else format_bytes(details['backing_size'])
-        hdd_used = f"used {format_bytes(fs_usage['used'])} free {format_bytes(fs_usage['free'])}" if fs_usage else "used/free N/A"
+        hdd_text = format_bytes_display(state, fs_usage['total']) if fs_usage else format_bytes_display(state, details['backing_size'])
+        hdd_used = f"{tr(state, 'used')} {format_bytes_display(state, fs_usage['used'])} {tr(state, 'free')} {format_bytes_display(state, fs_usage['free'])}" if fs_usage else tr(state, "used_free_unavailable")
         safe_addstr(stdscr,y,1,f"{tr(state, 'hdd_backing')}:  {hdd_text}")
         safe_addstr(stdscr,y,stats_right_x,hdd_used)
         y += 1
         if y < maxy - 5:
-            safe_addstr(stdscr,y,1,(tr(state, "recommend") + ": " + recs[0])[:maxx-2],3 if report["score"] < 80 else 2)
+            safe_addstr(stdscr,y,1,(tr(state, "recommend") + ": " + localize_message(state, recs[0]))[:maxx-2],3 if report["score"] < 80 else 2)
             y += 1
         diag = automatic_diagnosis(state.eff_history, eff, hps, mps, details, smart_health, state.docker_io_rates)
         anomaly = detect_anomalies(list(state.backing_write_history)[:-1], state.backing_write_rate_bytes)
         if y < maxy - 6:
-            safe_addstr(stdscr,y,1,(tr(state, "diagnosis_title") + ": " + (diag["recommendation"] if diag["problem"] else tr(state, "no_problem")))[:maxx-2],3 if diag["problem"] else 2)
+            diagnosis_text = localize_message(state, diag["recommendation"]) if diag["problem"] else tr(state, "no_problem")
+            safe_addstr(stdscr,y,1,(tr(state, "diagnosis_title") + ": " + diagnosis_text)[:maxx-2],3 if diag["problem"] else 2)
             y += 1
         if anomaly.get("anomaly") and y < maxy - 6:
-            safe_addstr(stdscr,y,1,("ANOMALY: " + anomaly["message"])[:maxx-2],1)
+            safe_addstr(stdscr,y,1,(tr(state, "anomaly") + ": " + localize_message(state, anomaly["message"]))[:maxx-2],1)
             y += 1
         if y < maxy - 6:
             guard = maintenance_guard(details, smart_health)
-            safe_addstr(stdscr,y,1,("MAINTENANCE: " + guard["message"])[:maxx-2],2 if guard["safe"] else 3)
+            safe_addstr(stdscr,y,1,(tr(state, "maintenance") + ": " + localize_message(state, guard["message"]))[:maxx-2],2 if guard["safe"] else 3)
             y += 1
         y += 1
         safe_addstr(stdscr,y,1,tr(state, "containers_title"),4)
@@ -2213,14 +2595,14 @@ def draw_main(stdscr):
         selection_label = f"{len(state.selected_containers)} {tr(state, 'selected')}" if state.selected_containers else tr(state, "all_empty_selection")
         safe_addstr(stdscr, y, 1, f"{tr(state, 'containers_title')}: {selection_label}", 4)
         y += 1
-        data_line = f"{tr(state, 'data')}: SYSFS {'OK' if sysfs_ok else tr(state, 'missing')} | DOCKER {state.docker_state}"
+        data_line = f"{tr(state, 'data')}: SYSFS {'OK' if sysfs_ok else tr(state, 'missing')} | DOCKER {localize_command_status(state, state.docker_state)}"
         if narrow_mode:
             safe_addstr(stdscr, y, 1, data_line, 4)
             y += 1
         else:
             safe_addstr(stdscr,y,32,data_line,4)
             y += 1
-        for warning in dependency_summary_lines(smart_health, state.docker_state, docker_enabled(state)):
+        for warning in dependency_summary_lines(smart_health, state.docker_state, docker_enabled(state), state):
             if y >= maxy - 3:
                 break
             safe_addstr(stdscr, y, 1, (f"{tr(state, 'dependency')}: " + warning)[:maxx-2], 3)
@@ -2228,11 +2610,16 @@ def draw_main(stdscr):
         if not docker_enabled(state) and y < maxy - 3:
             safe_addstr(stdscr, y, 1, (f"{tr(state, 'dependency')}: " + tr(state, "docker_disabled_hint"))[:maxx-2], 3)
             y += 1
+        for reason in missing_value_reasons(state, details, smart_health, state, sysfs_ok):
+            if y >= maxy - 3:
+                break
+            safe_addstr(stdscr, y, 1, (f"{tr(state, 'values_missing')}: " + reason)[:maxx-2], 3)
+            y += 1
         y += 1
         table_start_x = 1
 
         table_usable_w = max(1, maxx - table_start_x - 1)
-        names = [name for name, _, _, _, _ in state.docker_cache] or ["NAME"]
+        names = [name for name, _, _, _, _ in state.docker_cache] or [tr(state, "name")]
         longest_name = max(len(n) for n in names)
         name_col_w = min(max(12, longest_name + 2), max(12, int(table_usable_w * (0.35 if narrow_mode else 0.34))))
         metrics_w = max(36, table_usable_w - name_col_w)
@@ -2265,7 +2652,7 @@ def draw_main(stdscr):
             cpu_room = max(0, cpu_col_w - 10)
             mem_room = max(0, mem_col_w - 11)
             mem_bytes = parse_docker_mem_usage_bytes(mem_usage_raw)
-            mem_text = format_dirty_value(mem_bytes) if mem_bytes is not None else "N/A"
+            mem_text = format_bytes_display(state, mem_bytes)
             read_bytes, write_bytes = parse_docker_block_io_pair(block_io_raw)
 
             read_rate, write_rate = state.docker_io_rates.get(name, (None, None))
@@ -2280,23 +2667,23 @@ def draw_main(stdscr):
                 read_rate, write_rate = average_recent_io_rates(rate_history, now_ts)
                 state.docker_io_rates[name] = (read_rate, write_rate)
             if io_col_w >= 26:
-                io_text = f"R {format_io_rate(read_rate)} W {format_io_rate(write_rate)}"
+                io_text = f"{tr(state, 'read_short')} {format_io_rate_display(state, read_rate)} {tr(state, 'write_short')} {format_io_rate_display(state, write_rate)}"
             else:
                 total_rate = None if read_rate is None and write_rate is None else (read_rate or 0) + (write_rate or 0)
-                io_text = format_io_rate(total_rate)
+                io_text = format_io_rate_display(state, total_rate)
             bar_cpu, bar_cpu_empty = draw_meter(cpu, cpu_room, 2, empty_char=" ")
             bar_mem, bar_mem_empty = draw_meter(mem, mem_room, 3, empty_char=" ")
 
             max_name_len = max(6, name_col_w - 2)
             disp_name = name if len(name) <= max_name_len else name[:max_name_len-1] + "…"
             safe_addstr(stdscr,y,table_start_x,f"{disp_name:<{name_col_w-1}}")
-            safe_addstr(stdscr,y,cpu_x,f"C {cpu:5.1f}% ",6)
+            safe_addstr(stdscr,y,cpu_x,f"{tr(state, 'cpu_short')} {cpu:5.1f}% ",6)
             safe_addstr(stdscr,y,cpu_x + 9,bar_cpu,2)
             safe_addstr(stdscr,y,cpu_x + 9 + len(bar_cpu),bar_cpu_empty,6)
-            safe_addstr(stdscr,y,mem_x,f"R {mem_text:>8} ",6)
+            safe_addstr(stdscr,y,mem_x,f"{tr(state, 'ram_short')} {mem_text:>8} ",6)
             safe_addstr(stdscr,y,mem_x + 11,bar_mem,3)
             safe_addstr(stdscr,y,mem_x + 11 + len(bar_mem),bar_mem_empty,6)
-            safe_addstr(stdscr,y,io_x,f"D {io_text}",6)
+            safe_addstr(stdscr,y,io_x,f"{tr(state, 'disk_short')} {io_text}",6)
             y+=1
         if docker_refreshed:
             state.docker_io_prev = current_io_totals
@@ -2306,8 +2693,8 @@ def draw_main(stdscr):
                 state.docker_io_rates.pop(stale_name, None)
 
         if state.update_notice: safe_addstr(stdscr,maxy-2,1,state.update_notice,3)
-        if state.config_notice: safe_addstr(stdscr,maxy-2,1,state.config_notice,3)
-        elif state.device_warning: safe_addstr(stdscr,maxy-2,1,state.device_warning,3)
+        if state.config_notice: safe_addstr(stdscr,maxy-2,1,localize_message(state, state.config_notice),3)
+        elif state.device_warning: safe_addstr(stdscr,maxy-2,1,localize_message(state, state.device_warning),3)
         safe_addstr(stdscr,maxy-1,1,tr(state, "footer"),4)
 
         stdscr.refresh()

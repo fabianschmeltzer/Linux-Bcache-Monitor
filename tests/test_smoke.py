@@ -34,13 +34,13 @@ def test_version_metadata_is_in_sync():
     version = (repo_root / "VERSION").read_text().strip()
     readme = (repo_root / "README.md").read_text()
 
-    assert bcache_monitor.__version__ == version == "0.8.2"
+    assert bcache_monitor.__version__ == version == "0.8.3"
     assert f"**Version:** {version}" in readme
 
 
 def test_print_version_and_exit_for_cli_flag(capsys):
     assert bcache_monitor.print_version_and_exit_if_requested(["bcache-monitor", "--version"]) is True
-    assert capsys.readouterr().out.strip() == "0.8.2"
+    assert capsys.readouterr().out.strip() == "0.8.3"
 
 
 def test_info_lines_include_bugreport_and_ai_notice():
@@ -231,6 +231,36 @@ def test_dependency_summary_includes_direct_optional_command_checks(monkeypatch)
     assert any("smartmontools" in warning for warning in warnings)
 
 
+def test_dependency_summary_localizes_german_hints(monkeypatch):
+    monkeypatch.setattr(bcache_monitor.shutil, "which", lambda command: None)
+
+    warnings = bcache_monitor.dependency_summary_lines({}, "NOT INSTALLED", config_or_state={"language": "de"})
+
+    assert any("installieren" in warning for warning in warnings)
+    assert any("Docker" in warning for warning in warnings)
+
+
+def test_missing_value_reasons_explain_unavailable_values():
+    state = bcache_monitor.AppState(config={"language": "de"})
+    details = {
+        "writeback_rate_bytes": None,
+        "writeback_percent": None,
+        "writeback_running": None,
+        "cache_capacity": None,
+        "cache_available_percent": None,
+        "backing_size": None,
+        "fs_usage": None,
+        "device_stat": None,
+    }
+    smart = bcache_monitor.base_ssd_health([], dependency_hint="No cache device found for SSD health values.")
+
+    reasons = bcache_monitor.missing_value_reasons(state, details, smart, state, sysfs_ok=False)
+
+    assert any("bcache-Zähler" in reason for reason in reasons)
+    assert any("WB-Ziel" in reason for reason in reasons)
+    assert any("SSD-Gesundheit" in reason for reason in reasons)
+
+
 def test_automatic_diagnosis_recommends_sequential_cutoff_for_low_efficiency():
     details = {"cache_available_percent": 50, "dirty_bytes": 0, "cache_mode": "[writeback]"}
 
@@ -260,15 +290,15 @@ def test_docker_top_io_calculates_largest_share():
 
 def test_self_update_uses_script_version_when_version_file_is_stale(monkeypatch, tmp_path):
     installed = tmp_path / "bcache-monitor"
-    installed.write_text("#!/usr/bin/env python3\n__version__ = \"0.8.2\"\n" + "# old\n" * 300)
+    installed.write_text("#!/usr/bin/env python3\n__version__ = \"0.8.3\"\n" + "# old\n" * 300)
     installed.chmod(0o755)
-    remote_script = "#!/usr/bin/env python3\n__version__ = \"0.8.3\"\n" + "# new\n" * 300
+    remote_script = "#!/usr/bin/env python3\n__version__ = \"0.8.4\"\n" + "# new\n" * 300
     exec_args = {}
 
     monkeypatch.delenv(bcache_monitor.UPDATE_FAIL_COUNT_ENV, raising=False)
     monkeypatch.delenv("BCACHE_MONITOR_UPDATED_TO", raising=False)
     monkeypatch.setattr(bcache_monitor, "__file__", str(installed))
-    monkeypatch.setattr(bcache_monitor, "read_remote_text", lambda _url: "0.8.2")
+    monkeypatch.setattr(bcache_monitor, "read_remote_text", lambda _url: "0.8.3")
     monkeypatch.setattr(bcache_monitor, "read_remote_bytes", lambda _url: remote_script.encode("utf-8"))
     monkeypatch.setattr(bcache_monitor.time, "sleep", lambda _seconds: None)
 
@@ -285,6 +315,6 @@ def test_self_update_uses_script_version_when_version_file_is_stale(monkeypatch,
         pass
 
     assert installed.read_text() == remote_script
-    assert bcache_monitor.os.environ["BCACHE_MONITOR_UPDATED_FROM"] == "0.8.2"
-    assert bcache_monitor.os.environ["BCACHE_MONITOR_UPDATED_TO"] == "0.8.3"
+    assert bcache_monitor.os.environ["BCACHE_MONITOR_UPDATED_FROM"] == "0.8.3"
+    assert bcache_monitor.os.environ["BCACHE_MONITOR_UPDATED_TO"] == "0.8.4"
     assert exec_args["args"][1] == str(installed)

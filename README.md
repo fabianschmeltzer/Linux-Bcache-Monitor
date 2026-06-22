@@ -108,11 +108,11 @@ Open settings with `S`, switch to the language section with `Tab`, and press `Sp
 
 ## 🧠 Diagnostics and tuning helpers
 
-Version 0.8.2 smooths byte-per-second throughput displays with a recent-window average so HDD and Docker I/O values no longer jump to zero on short idle samples. Earlier 0.8.x releases added reusable analysis helpers for automatic diagnosis, before/after hit-rate comparison, anomaly detection, Docker I/O ranking, Raspberry Pi status, cache-size advice, maintenance protection, lifetime prediction, and auto-tuning suggestions.
+Version 0.8.3 completes the German dashboard localization and adds visible explanations for unavailable values instead of leaving bare `N/A` entries. Version 0.8.2 smoothed byte-per-second throughput displays with a recent-window average so HDD and Docker I/O values no longer jump to zero on short idle samples.
 
 ## ℹ️ Info, credits, and legal notes
 
-- **Version:** 0.8.2
+- **Version:** 0.8.3
 - **Credits:** by Fabian Schmeltzer
 - **AI note:** This program was written with AI assistance and may contain errors. Please verify critical output and use this tool at your own risk.
 - **Bug reports:** Please submit bugs and improvement suggestions via GitHub Issues: <https://github.com/fabianschmeltzer/Linux-Bcache-Monitor/issues>
