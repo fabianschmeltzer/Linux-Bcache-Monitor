@@ -108,11 +108,11 @@ Open settings with `S`, switch to the language section with `Tab`, and press `Sp
 
 ## 🧠 Diagnostics and tuning helpers
 
-Version 0.8.0 adds reusable analysis helpers for automatic diagnosis, before/after hit-rate comparison, anomaly detection, Docker I/O ranking, Raspberry Pi status, cache-size advice, maintenance protection, lifetime prediction, and auto-tuning suggestions. The dashboard surfaces the most important diagnosis, anomaly, and maintenance messages inline while keeping Prometheus output stable.
+Version 0.8.2 smooths byte-per-second throughput displays with a recent-window average so HDD and Docker I/O values no longer jump to zero on short idle samples. Earlier 0.8.x releases added reusable analysis helpers for automatic diagnosis, before/after hit-rate comparison, anomaly detection, Docker I/O ranking, Raspberry Pi status, cache-size advice, maintenance protection, lifetime prediction, and auto-tuning suggestions.
 
 ## ℹ️ Info, credits, and legal notes
 
-- **Version:** 0.8.0
+- **Version:** 0.8.2
 - **Credits:** by Fabian Schmeltzer
 - **AI note:** This program was written with AI assistance and may contain errors. Please verify critical output and use this tool at your own risk.
 - **Bug reports:** Please submit bugs and improvement suggestions via GitHub Issues: <https://github.com/fabianschmeltzer/Linux-Bcache-Monitor/issues>
@@ -135,8 +135,10 @@ Version 0.8.0 adds reusable analysis helpers for automatic diagnosis, before/aft
 - **SSD life / SSD temp / SSD TBW:** Optional SMART/NVMe cache device health values.
 - **WB target:** Background writeback rate (`writeback_rate`) reported by bcache in bytes/s. This is bcache's throttle/target rate and not necessarily identical to physical HDD I/O.
 - **WB percent / WB running:** Target share for dirty data and status indicating whether bcache background writeback is running.
-- **HDD write:** Real backing-device write rate calculated from `/sys/block/<device>/stat` between two samples. Helps show whether dirty data is actually draining to HDD.
-- **Docker DISK:** Read and write rates from Docker `BlockIO` deltas since the last Docker refresh. The last calculated rate remains visible until a new Docker sample is available.
+- **HDD write:** Real backing-device write rate calculated from `/sys/block/<device>/stat` and displayed as a recent-window average. Helps show whether dirty data is actually draining to HDD without short idle samples forcing the display to zero.
+- **Docker DISK:** Read and write rates from Docker `BlockIO` deltas displayed as a recent-window average.
+
+The throughput average window defaults to `10` seconds and can be changed with `BCACHE_MONITOR_RATE_AVERAGE_SECONDS`.
 
 Reference sources: The [Linux kernel documentation](https://docs.kernel.org/admin-guide/bcache.html) describes bcache sysfs values such as `dirty_data`, `writeback_percent`, `writeback_rate`, `cache_available_percent`, `bucket_size`, and `nbuckets`. [GitHub Docs](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/licensing-a-repository) and [Choose a License](https://choosealicense.com/no-permission/) explain the legal baseline for repositories without a license.
 

@@ -34,13 +34,13 @@ def test_version_metadata_is_in_sync():
     version = (repo_root / "VERSION").read_text().strip()
     readme = (repo_root / "README.md").read_text()
 
-    assert bcache_monitor.__version__ == version == "0.8.1"
+    assert bcache_monitor.__version__ == version == "0.8.2"
     assert f"**Version:** {version}" in readme
 
 
 def test_print_version_and_exit_for_cli_flag(capsys):
     assert bcache_monitor.print_version_and_exit_if_requested(["bcache-monitor", "--version"]) is True
-    assert capsys.readouterr().out.strip() == "0.8.1"
+    assert capsys.readouterr().out.strip() == "0.8.2"
 
 
 def test_info_lines_include_bugreport_and_ai_notice():
@@ -116,6 +116,20 @@ def test_calculate_device_rates_uses_written_sectors():
 
     assert read_rate == 1024
     assert write_rate == 2048
+
+
+def test_average_recent_io_rates_uses_recent_window():
+    history = bcache_monitor.deque([
+        (1.0, 100.0, 200.0),
+        (8.0, 300.0, 600.0),
+        (10.0, 0.0, 0.0),
+    ])
+
+    read_rate, write_rate = bcache_monitor.average_recent_io_rates(history, 10.0, window_seconds=5.0)
+
+    assert read_rate == 150.0
+    assert write_rate == 300.0
+    assert list(history) == [(8.0, 300.0, 600.0), (10.0, 0.0, 0.0)]
 
 
 def test_parse_mountinfo_lines_matches_direct_device():
@@ -246,15 +260,15 @@ def test_docker_top_io_calculates_largest_share():
 
 def test_self_update_uses_script_version_when_version_file_is_stale(monkeypatch, tmp_path):
     installed = tmp_path / "bcache-monitor"
-    installed.write_text("#!/usr/bin/env python3\n__version__ = \"0.8.1\"\n" + "# old\n" * 300)
+    installed.write_text("#!/usr/bin/env python3\n__version__ = \"0.8.2\"\n" + "# old\n" * 300)
     installed.chmod(0o755)
-    remote_script = "#!/usr/bin/env python3\n__version__ = \"0.8.1\"\n" + "# new\n" * 300
+    remote_script = "#!/usr/bin/env python3\n__version__ = \"0.8.3\"\n" + "# new\n" * 300
     exec_args = {}
 
     monkeypatch.delenv(bcache_monitor.UPDATE_FAIL_COUNT_ENV, raising=False)
     monkeypatch.delenv("BCACHE_MONITOR_UPDATED_TO", raising=False)
     monkeypatch.setattr(bcache_monitor, "__file__", str(installed))
-    monkeypatch.setattr(bcache_monitor, "read_remote_text", lambda _url: "0.8.1")
+    monkeypatch.setattr(bcache_monitor, "read_remote_text", lambda _url: "0.8.2")
     monkeypatch.setattr(bcache_monitor, "read_remote_bytes", lambda _url: remote_script.encode("utf-8"))
     monkeypatch.setattr(bcache_monitor.time, "sleep", lambda _seconds: None)
 
@@ -271,6 +285,6 @@ def test_self_update_uses_script_version_when_version_file_is_stale(monkeypatch,
         pass
 
     assert installed.read_text() == remote_script
-    assert bcache_monitor.os.environ["BCACHE_MONITOR_UPDATED_FROM"] == "0.8.1"
-    assert bcache_monitor.os.environ["BCACHE_MONITOR_UPDATED_TO"] == "0.8.1"
+    assert bcache_monitor.os.environ["BCACHE_MONITOR_UPDATED_FROM"] == "0.8.2"
+    assert bcache_monitor.os.environ["BCACHE_MONITOR_UPDATED_TO"] == "0.8.3"
     assert exec_args["args"][1] == str(installed)

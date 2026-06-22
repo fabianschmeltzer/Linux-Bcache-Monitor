@@ -3,7 +3,7 @@ import curses, time, subprocess, os, sys, urllib.request, glob, json, textwrap, 
 from dataclasses import dataclass, field
 from collections import deque
 
-__version__ = "0.8.1"
+__version__ = "0.8.2"
 
 # URLs can be overridden for your publish target, e.g. GitHub raw links.
 VERSION_URL = os.environ.get("BCACHE_MONITOR_VERSION_URL", "https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monitor/main/VERSION")
@@ -14,6 +14,7 @@ FIXED_MAX_PS = int(os.environ.get("BCACHE_MONITOR_MAX_PS", "0") or 0)
 DOCKER_REFRESH_SECONDS = float(os.environ.get("BCACHE_MONITOR_DOCKER_REFRESH_SECONDS", "4"))
 FRAME_SECONDS = float(os.environ.get("BCACHE_MONITOR_FRAME_SECONDS", "0.2"))
 MIN_RATE_SAMPLE_SECONDS = float(os.environ.get("BCACHE_MONITOR_MIN_RATE_SAMPLE_SECONDS", "0.2"))
+RATE_AVERAGE_SECONDS = float(os.environ.get("BCACHE_MONITOR_RATE_AVERAGE_SECONDS", "10"))
 HISTORY=240
 TREND_WINDOW=30
 EFF_WARN_THRESHOLD=70.0
@@ -672,6 +673,21 @@ def calculate_device_rates(prev_sample, current_stat, now_ts):
     read_rate = read_delta * 512 / elapsed if read_delta >= 0 else None
     write_rate = write_delta * 512 / elapsed if write_delta >= 0 else None
     return read_rate, write_rate
+
+
+def average_recent_io_rates(rate_history, now_ts, window_seconds=RATE_AVERAGE_SECONDS):
+    if rate_history is None:
+        return None, None
+
+    cutoff = now_ts - max(0.0, window_seconds)
+    while rate_history and rate_history[0][0] < cutoff:
+        rate_history.popleft()
+
+    read_values = [sample[1] for sample in rate_history if sample[1] is not None]
+    write_values = [sample[2] for sample in rate_history if sample[2] is not None]
+    read_avg = sum(read_values) / len(read_values) if read_values else None
+    write_avg = sum(write_values) / len(write_values) if write_values else None
+    return read_avg, write_avg
 
 
 def read_bcache_details(device_name, bcache_path):
@@ -1474,7 +1490,9 @@ class AppState:
     docker_last: float = 0.0
     docker_io_prev: dict = field(default_factory=dict)
     docker_io_rates: dict = field(default_factory=dict)
+    docker_io_rate_history: dict = field(default_factory=dict)
     backing_io_prev: tuple = None
+    backing_rate_history: deque = field(default_factory=lambda: deque(maxlen=HISTORY))
     backing_write_rate_bytes: float = None
     smart_cache: dict = field(default_factory=dict)
     smart_last: float = 0.0
@@ -1857,12 +1875,12 @@ def info_lines(state):
             "DELTA: Vergleich aktueller Werte mit dem Fensterdurchschnitt. Bei Leerlauf oder sehr kleiner Basis wird n/a angezeigt, damit irreführende Werte wie -100% vermieden werden.",
             "GESUNDHEIT: Ampelstatus aus EFF, MISS/HIT und Fehltreffer-Trend. Das ist ein schneller Warnhinweis, ersetzt aber keine Ursachenanalyse.",
             "CACHE-WERTE: Gesamte Treffer/Fehltreffer, Effizienz, Spitzenraten, Cache-Modus, Cache-Größe, Writeback-Zielrate, echte HDD-Schreibrate und freier Writeback-Anteil.",
-            "CONTAINER CPU/RAM/DATENTRÄGER: Docker-Statistiken. DATENTRÄGER zeigt Lese-/Schreibraten aus Docker-BlockIO-Deltas und behält die letzten Werte bis zur nächsten Docker-Abfrage.",
+            "CONTAINER CPU/RAM/DATENTRÄGER: Docker-Statistiken. DATENTRÄGER zeigt den Durchschnitt der Lese-/Schreibraten aus Docker-BlockIO-Deltas über das jüngste Zeitfenster.",
             "",
             "Zusätzliche Informationen und Grenzen:",
             "HDD-/Backing-Größe: Wird aus /sys/block/<Gerät>/size berechnet. Belegter/freier Dateisystemplatz wird über /proc/self/mountinfo und /proc/mounts ermittelt, inklusive aufgelöster /dev/disk/by-*-Pfade.",
             "SSD-/Cache-Größe: Wird berechnet, wenn sysfs Daten bereitstellt, über bcache cache*/bucket_size * nbuckets. Der freie Writeback-Anteil nutzt cache_available_percent.",
-            "Cache->HDD-Schreibgeschwindigkeit: WB-Ziel ist die von bcache gemeldete bzw. gedrosselte Hintergrund-Writeback-Rate. HDD-Schreiben wird zusätzlich aus /sys/block/<Gerät>/stat berechnet und liegt näher an der physischen Schreibrate.",
+            "Cache->HDD-Schreibgeschwindigkeit: WB-Ziel ist die von bcache gemeldete bzw. gedrosselte Hintergrund-Writeback-Rate. HDD-Schreiben wird zusätzlich aus /sys/block/<Gerät>/stat berechnet und als Durchschnitt über das jüngste Zeitfenster angezeigt.",
             "cache_mode: writethrough/writeback/writearound/none steuert, wie bcache Lese- und Schreibzugriffe behandelt. Besonders writeback kann Dirty Data puffern.",
             "writeback_percent/running: Zielprozentsatz für Dirty Data und Status des Hintergrund-Writebacks. Wichtig, damit Dirty Data nicht dauerhaft liegen bleibt.",
             "",
@@ -1887,12 +1905,12 @@ def info_lines(state):
         "DELTA: Comparison of current values with window average. During idle or very small baseline, n/a is shown because percentages like -100% would be misleading.",
         "HEALTH: Traffic-light status from EFF, MISS/HIT, and miss trend. Useful as a quick warning; it does not replace root-cause analysis.",
         "CACHE NUMBERS: Total hits/misses, efficiency, peak rates, cache mode, cache size, writeback target rate, real HDD write throughput, and available writeback share.",
-        "CONTAINERS CPU/RAM/DISK: Docker statistics. DISK shows read/write rates from Docker BlockIO deltas and keeps last values until the next Docker sample.",
+        "CONTAINERS CPU/RAM/DISK: Docker statistics. DISK shows average read/write rates from Docker BlockIO deltas over the recent time window.",
         "",
         "Additional info and limits:",
         "HDD/backing size: Calculated from /sys/block/<device>/size. Used/free filesystem space is discovered via /proc/self/mountinfo and /proc/mounts, including resolved /dev/disk/by-* paths.",
         "SSD/cache size: Calculated when sysfs exposes data, via bcache cache*/bucket_size * nbuckets. Available writeback share uses cache_available_percent.",
-        "Cache->HDD write speed: WB target is bcache's reported/throttled background writeback rate. HDD write is additionally calculated from /sys/block/<device>/stat and is closer to physical write speed.",
+        "Cache->HDD write speed: WB target is bcache's reported/throttled background writeback rate. HDD write is additionally calculated from /sys/block/<device>/stat and displayed as a recent-window average.",
         "cache_mode: writethrough/writeback/writearound/none controls how bcache handles reads/writes. In particular, writeback can buffer dirty data.",
         "writeback_percent/running: Dirty data target percentage and whether background writeback is active. Important so dirty data does not remain indefinitely.",
         "",
@@ -2009,8 +2027,10 @@ def draw_main(stdscr):
         if details.get("device_stat"):
             state.backing_io_prev = (details["device_stat"], now)
         if backing_write_rate is not None:
-            state.backing_write_rate_bytes = backing_write_rate
-            state.backing_write_history.append(backing_write_rate)
+            state.backing_rate_history.append((now, backing_read_rate, backing_write_rate))
+            _avg_backing_read_rate, avg_backing_write_rate = average_recent_io_rates(state.backing_rate_history, now)
+            state.backing_write_rate_bytes = avg_backing_write_rate
+            state.backing_write_history.append(avg_backing_write_rate)
         dirty_bytes = details["dirty_bytes"]
         dirty_display=format_dirty_value(dirty_bytes)
 
@@ -2254,6 +2274,10 @@ def draw_main(stdscr):
                     state.docker_io_prev.get(name), read_bytes, write_bytes, now_ts
                 )
                 current_io_totals[name] = totals_sample
+                rate_history = state.docker_io_rate_history.setdefault(name, deque(maxlen=HISTORY))
+                if read_rate is not None or write_rate is not None:
+                    rate_history.append((now_ts, read_rate, write_rate))
+                read_rate, write_rate = average_recent_io_rates(rate_history, now_ts)
                 state.docker_io_rates[name] = (read_rate, write_rate)
             if io_col_w >= 26:
                 io_text = f"R {format_io_rate(read_rate)} W {format_io_rate(write_rate)}"
@@ -2276,6 +2300,10 @@ def draw_main(stdscr):
             y+=1
         if docker_refreshed:
             state.docker_io_prev = current_io_totals
+            active_names = {name for name, _, _, _, _ in state.docker_cache}
+            for stale_name in set(state.docker_io_rate_history) - active_names:
+                state.docker_io_rate_history.pop(stale_name, None)
+                state.docker_io_rates.pop(stale_name, None)
 
         if state.update_notice: safe_addstr(stdscr,maxy-2,1,state.update_notice,3)
         if state.config_notice: safe_addstr(stdscr,maxy-2,1,state.config_notice,3)
