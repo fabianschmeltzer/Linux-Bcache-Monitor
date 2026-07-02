@@ -1,14 +1,25 @@
 #!/usr/bin/env python3
-import curses, time, subprocess, os, sys, urllib.request, glob, json, textwrap, shutil, csv
+import csv
+import curses
+import glob
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import textwrap
+import time
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from collections import deque
 
-__version__ = "0.8.3"
+__version__ = "0.9.0"
 
 # URLs can be overridden for your publish target, e.g. GitHub raw links.
 VERSION_URL = os.environ.get("BCACHE_MONITOR_VERSION_URL", "https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monitor/main/VERSION")
 SCRIPT_URL = os.environ.get("BCACHE_MONITOR_SCRIPT_URL", "https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monitor/main/bcache-monitor")
-BCACHE_ENV_DEVICE = os.environ.get("BCACHE_MONITOR_DEVICE", "").strip()
 BCACHE = ""
 FIXED_MAX_PS = int(os.environ.get("BCACHE_MONITOR_MAX_PS", "0") or 0)
 DOCKER_REFRESH_SECONDS = float(os.environ.get("BCACHE_MONITOR_DOCKER_REFRESH_SECONDS", "4"))
@@ -26,7 +37,11 @@ MISS_TREND_CRITICAL=1.50
 MIN_DELTA_BASELINE_PS=1.0
 MIN_HEALTH_TREND_EVENTS=3
 HISTORY_CSV_PATH = os.environ.get("BCACHE_MONITOR_HISTORY_CSV", os.path.expanduser("~/.local/share/bcache-monitor/history.csv"))
+HISTORY_SAMPLE_SECONDS = float(os.environ.get("BCACHE_MONITOR_HISTORY_INTERVAL_SECONDS", "60"))
 SMART_REFRESH_SECONDS = float(os.environ.get("BCACHE_MONITOR_SMART_REFRESH_SECONDS", "60"))
+SYSFS_ROOT = os.environ.get("BCACHE_MONITOR_SYSFS_ROOT", "/sys").rstrip("/") or "/sys"
+PROC_ROOT = os.environ.get("BCACHE_MONITOR_PROC_ROOT", "/proc").rstrip("/") or "/proc"
+DEV_ROOT = os.environ.get("BCACHE_MONITOR_DEV_ROOT", "/dev").rstrip("/") or "/dev"
 DEPENDENCY_INSTALL_HINTS = {
     "docker": "Install Docker CLI (docker) to show container CPU/MEM/DISK values.",
     "nvme": "Install nvme-cli (nvme) to show NVMe SSD health values.",
@@ -38,6 +53,48 @@ MIN_SCRIPT_SIZE_BYTES = 1024
 MAX_SCRIPT_SIZE_BYTES = 512 * 1024
 MAX_UPDATE_FAILURES = 3
 UPDATE_FAIL_COUNT_ENV = "BCACHE_MONITOR_UPDATE_FAIL_COUNT"
+
+
+@dataclass
+class MetricValue:
+    value: object = None
+    unit: str = ""
+    source: str = ""
+    status: str = "unavailable"
+    reason: str = ""
+
+    def as_dict(self):
+        return {
+            "value": self.value,
+            "unit": self.unit,
+            "source": self.source,
+            "status": self.status,
+            "reason": self.reason,
+        }
+
+
+@dataclass
+class BcacheTopology:
+    device: str = ""
+    bcache_path: str = ""
+    cache_set_path: str = ""
+    backing_device: str = ""
+    cache_block_devices: list = field(default_factory=list)
+    health_devices: list = field(default_factory=list)
+    status: str = "unavailable"
+    errors: list = field(default_factory=list)
+
+    def as_dict(self):
+        return {
+            "device": self.device,
+            "bcache_path": self.bcache_path,
+            "cache_set_path": self.cache_set_path,
+            "backing_device": self.backing_device,
+            "cache_block_devices": list(self.cache_block_devices),
+            "health_devices": list(self.health_devices),
+            "status": self.status,
+            "errors": list(self.errors),
+        }
 
 def normalize_version_string(value):
     if value is None:
@@ -108,6 +165,8 @@ TRANSLATIONS = {
         "mode": "Modus",
         "wb_target": "WB-Ziel",
         "flush_eta": "Flush-Restzeit",
+        "flush_source_wb": "WB-Ziel",
+        "flush_source_backing": "HDD-Schätzung",
         "ssd_life": "SSD-Lebensdauer",
         "ssd_temp": "SSD-Temp",
         "ssd_tbw": "SSD TBW",
@@ -176,9 +235,12 @@ TRANSLATIONS = {
         "cache_available_missing": "Freier WB fehlt: cache_available_percent ist nicht lesbar.",
         "backing_size_missing": "HDD/Backing-Größe fehlt: /sys/block/<Gerät>/size ist nicht lesbar.",
         "fs_usage_missing": "Belegt/frei fehlt: kein Mountpunkt für das bcache-Gerät gefunden.",
-        "device_stat_missing": "HDD-Schreibrate fehlt: /sys/block/<Gerät>/stat ist nicht lesbar.",
+        "device_stat_missing": "HDD-Schreibrate fehlt: /sys/class/block/<Backing-Gerät>/stat ist nicht lesbar.",
         "device_rate_waiting": "HDD-Schreibrate fehlt noch: warte auf die zweite Geräteprobe.",
         "ssd_health_missing": "SSD-Gesundheit fehlt",
+        "ssd_life_missing": "SSD-Restlebensdauer fehlt",
+        "ssd_temp_missing": "SSD-Temperatur fehlt",
+        "ssd_tbw_missing": "SSD-TBW fehlt",
         "docker_values_missing": "Docker-Werte fehlen",
         "docker_io_waiting": "Docker-Datenträgerwerte fehlen noch: warte auf die zweite Docker-Abfrage.",
         "cpu_short": "C",
@@ -221,6 +283,8 @@ TRANSLATIONS = {
         "mode": "Mode",
         "wb_target": "WB target",
         "flush_eta": "Flush ETA",
+        "flush_source_wb": "WB target",
+        "flush_source_backing": "HDD estimate",
         "ssd_life": "SSD life",
         "ssd_temp": "SSD temp",
         "ssd_tbw": "SSD TBW",
@@ -289,9 +353,12 @@ TRANSLATIONS = {
         "cache_available_missing": "Avail WB unavailable: cache_available_percent is not readable.",
         "backing_size_missing": "HDD/backing size unavailable: /sys/block/<device>/size is not readable.",
         "fs_usage_missing": "Used/free unavailable: no mount point found for the bcache device.",
-        "device_stat_missing": "HDD write unavailable: /sys/block/<device>/stat is not readable.",
+        "device_stat_missing": "HDD write unavailable: /sys/class/block/<backing-device>/stat is not readable.",
         "device_rate_waiting": "HDD write unavailable yet: waiting for the second device sample.",
         "ssd_health_missing": "SSD health unavailable",
+        "ssd_life_missing": "SSD remaining life unavailable",
+        "ssd_temp_missing": "SSD temperature unavailable",
+        "ssd_tbw_missing": "SSD TBW unavailable",
         "docker_values_missing": "Docker values unavailable",
         "docker_io_waiting": "Docker disk values unavailable yet: waiting for the second Docker sample.",
         "cpu_short": "C",
@@ -334,6 +401,7 @@ def localize_status(config_or_state, status):
         "WARN": "WARNUNG",
         "CRITICAL": "KRITISCH",
         "FAILURE": "AUSFALL",
+        "DATA INCOMPLETE": "DATEN UNVOLLSTÄNDIG",
         "OK": "OK",
     }.get(status, status)
 
@@ -413,6 +481,12 @@ def localize_message(config_or_state, message):
         "Config is invalid (JSON). Using defaults.": "Konfiguration ist ungültig (JSON). Standardwerte werden verwendet.",
         "No write permission for config.": "Keine Schreibberechtigung für die Konfiguration.",
         "No bcache device found (expected: /sys/block/*/bcache).": "Kein bcache-Gerät gefunden (erwartet: /sys/block/*/bcache).",
+        "device does not expose a reliable value": "Das Gerät stellt keinen zuverlässig interpretierbaren Wert bereit.",
+        "SSD health collection is in progress.": "SSD-Gesundheitswerte werden gerade erfasst.",
+        "Core bcache values are incomplete; health score suppressed": "Kernwerte von bcache sind unvollständig; die Gesundheitswertung wird ausgeblendet.",
+        "Core bcache values are incomplete; no tuning recommendation generated.": "Kernwerte von bcache sind unvollständig; es wird keine Tuning-Empfehlung erzeugt.",
+        "Inspect workload and sequential_cutoff; change it only after confirming sequential bypass.": "Last und sequential_cutoff prüfen; erst nach bestätigtem sequenziellem Bypass ändern.",
+        "Run --diagnose and fix the reported data source before tuning bcache.": "Vor dem bcache-Tuning --diagnose ausführen und die gemeldete Datenquelle korrigieren.",
     }
     if text in exact:
         return exact[text]
@@ -429,6 +503,7 @@ def localize_message(config_or_state, message):
         details = details.replace("dirty data present", "Dirty Data vorhanden")
         details = details.replace("cache SSD life below 15%", "Cache-SSD-Lebensdauer unter 15%")
         details = details.replace("cache SSD temperature critical", "Cache-SSD-Temperatur kritisch")
+        details = details.replace("core bcache values are incomplete", "Kernwerte von bcache sind unvollständig")
         return "Vor Wartung warten: " + details
     if text.startswith("Unusual write load: "):
         details = text[len("Unusual write load: "):].rstrip(".")
@@ -503,7 +578,20 @@ def check_optional_dependencies():
 def dependency_summary_lines(smart_health=None, docker_state="", include_docker=True, config_or_state=None):
     lines = dependency_warnings(smart_health, docker_state, config_or_state)
     seen = set(lines)
+    relevant_commands = {"docker"} if include_docker else set()
+    smart = smart_health or {}
+    if not ssd_health_has_data(smart):
+        device_names = [
+            os.path.basename(item.get("device", ""))
+            for item in smart.get("devices", [])
+            if item.get("device")
+        ]
+        if not device_names and smart.get("device"):
+            device_names = [os.path.basename(smart["device"])]
+        relevant_commands.add("nvme" if any(name.startswith("nvme") for name in device_names) else "smartctl")
     for item in check_optional_dependencies():
+        if item["command"] not in relevant_commands:
+            continue
         if item["command"] == "docker" and not include_docker:
             continue
         if item["command"] == "docker" and docker_state == "NOT INSTALLED":
@@ -522,22 +610,54 @@ def safe_addstr(stdscr,y,x,text,color=0):
             available = maxx - x
             if available > 0:
                 stdscr.addstr(y,x,text[:available],curses.color_pair(color))
-        except:
+        except curses.error:
             pass
 
 # ---------- HELPERS ----------
 
-def read(p):
+def sysfs_path(*parts):
+    return os.path.join(SYSFS_ROOT, *[str(part).strip("/\\") for part in parts])
+
+
+def proc_path(*parts):
+    return os.path.join(PROC_ROOT, *[str(part).strip("/\\") for part in parts])
+
+
+def dev_path(device_name):
+    return os.path.join(DEV_ROOT, str(device_name).lstrip("/\\"))
+
+
+def read_metric(path, parser=None, unit=""):
     try:
-        return open(p).read().strip()
-    except (FileNotFoundError, PermissionError, OSError):
-        return None
+        with open(path, "r", encoding="utf-8") as src:
+            raw = src.read().strip()
+    except FileNotFoundError:
+        return MetricValue(unit=unit, source=path, status="unavailable", reason="path does not exist")
+    except PermissionError:
+        return MetricValue(unit=unit, source=path, status="error", reason="permission denied")
+    except OSError as exc:
+        return MetricValue(unit=unit, source=path, status="error", reason=str(exc))
+
+    if parser is None:
+        return MetricValue(value=raw, unit=unit, source=path, status="ok")
+    try:
+        value = parser(raw)
+    except (TypeError, ValueError, OverflowError) as exc:
+        return MetricValue(unit=unit, source=path, status="error", reason=f"invalid value: {exc}")
+    if value is None:
+        return MetricValue(unit=unit, source=path, status="error", reason=f"unsupported value format: {raw!r}")
+    return MetricValue(value=value, unit=unit, source=path, status="ok")
+
+
+def read(p):
+    metric = read_metric(p)
+    return metric.value if metric.status == "ok" else None
 
 def parse_version(v):
     try:
         token = normalize_version_string(v)
         return tuple(int(part) for part in token.split("."))
-    except:
+    except (TypeError, ValueError):
         return (0,)
 
 def read_remote_text(url):
@@ -546,7 +666,7 @@ def read_remote_text(url):
     try:
         with urllib.request.urlopen(url, timeout=3) as r:
             return r.read().decode("utf-8").strip()
-    except:
+    except (OSError, UnicodeDecodeError, ValueError):
         return ""
 
 def read_remote_bytes(url):
@@ -555,7 +675,7 @@ def read_remote_bytes(url):
     try:
         with urllib.request.urlopen(url, timeout=3) as r:
             return r.read()
-    except:
+    except OSError:
         return b""
 
 
@@ -584,6 +704,11 @@ def validate_update_script(script_bytes):
     if not is_valid_version_string(downloaded_version):
         return None, "Script does not contain a valid __version__"
 
+    try:
+        compile(script_content, "<bcache-monitor-update>", "exec")
+    except SyntaxError as exc:
+        return None, f"downloaded script has invalid Python syntax: {exc}"
+
     return script_content, ""
 
 def print_update_event(message):
@@ -595,7 +720,7 @@ def get_update_fail_count():
     raw = os.environ.get(UPDATE_FAIL_COUNT_ENV, "0").strip()
     try:
         return max(0, int(raw))
-    except:
+    except (TypeError, ValueError):
         return 0
 
 
@@ -701,7 +826,7 @@ def self_update_if_needed():
         try:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
-        except:
+        except OSError:
             pass
 
     return False
@@ -710,28 +835,20 @@ def parse_sysfs_size_bytes(raw_value):
     if raw_value is None:
         return None
 
-    token = str(raw_value).strip()
+    token = str(raw_value).strip().replace(" ", "")
     if not token:
         return None
 
-    token = token.replace(" ", "")
-    lower = token.lower()
-
-    i = 0
-    while i < len(lower) and (lower[i].isdigit() or lower[i] == "."):
-        i += 1
-
-    if i == 0:
+    match = re.fullmatch(r"([+]?(?:\d+(?:\.\d*)?|\.\d+))([A-Za-z]*)(?:/s)?", token)
+    if not match:
         return None
-
-    number = lower[:i]
-    suffix = lower[i:]
 
     try:
-        value = float(number)
-    except:
+        value = float(match.group(1))
+    except ValueError:
         return None
 
+    suffix = match.group(2).lower()
     units = {
         "": 1,
         "b": 1,
@@ -744,6 +861,12 @@ def parse_sysfs_size_bytes(raw_value):
         "g": 1024 ** 3,
         "gb": 1024 ** 3,
         "gib": 1024 ** 3,
+        "t": 1024 ** 4,
+        "tb": 1024 ** 4,
+        "tib": 1024 ** 4,
+        "p": 1024 ** 5,
+        "pb": 1024 ** 5,
+        "pib": 1024 ** 5,
     }
 
     if suffix not in units:
@@ -752,25 +875,50 @@ def parse_sysfs_size_bytes(raw_value):
     return int(value * units[suffix])
 
 
+def parse_docker_size_bytes(raw_value):
+    if raw_value is None:
+        return None
+    token = str(raw_value).strip().replace(" ", "")
+    match = re.fullmatch(r"([+]?(?:\d+(?:\.\d*)?|\.\d+))([A-Za-z]*)", token)
+    if not match:
+        return None
+    try:
+        value = float(match.group(1))
+    except ValueError:
+        return None
+
+    suffix = match.group(2)
+    units = {
+        "": 1,
+        "B": 1,
+        "kB": 1000,
+        "KB": 1000,
+        "MB": 1000 ** 2,
+        "GB": 1000 ** 3,
+        "TB": 1000 ** 4,
+        "PB": 1000 ** 5,
+        "KiB": 1024,
+        "MiB": 1024 ** 2,
+        "GiB": 1024 ** 3,
+        "TiB": 1024 ** 4,
+        "PiB": 1024 ** 5,
+    }
+    multiplier = units.get(suffix)
+    return None if multiplier is None else int(value * multiplier)
+
+
 def parse_docker_mem_usage_bytes(mem_usage_raw):
     if not mem_usage_raw:
         return None
     left = str(mem_usage_raw).split("/", 1)[0].strip()
-    return parse_sysfs_size_bytes(left)
-
-def parse_docker_block_io_bytes(block_io_raw):
-    if not block_io_raw:
-        return None
-    left = str(block_io_raw).split("/", 1)[0].strip()
-    return parse_sysfs_size_bytes(left)
-
+    return parse_docker_size_bytes(left)
 
 def parse_docker_block_io_pair(block_io_raw):
     if not block_io_raw:
         return None, None
     parts = str(block_io_raw).split("/", 1)
-    read_bytes = parse_sysfs_size_bytes(parts[0].strip()) if parts else None
-    write_bytes = parse_sysfs_size_bytes(parts[1].strip()) if len(parts) > 1 else None
+    read_bytes = parse_docker_size_bytes(parts[0].strip()) if parts else None
+    write_bytes = parse_docker_size_bytes(parts[1].strip()) if len(parts) > 1 else None
     return read_bytes, write_bytes
 
 
@@ -818,12 +966,6 @@ def format_bytes(value):
     return f"{tib:.1f} TiB"
 
 
-def dirty_val():
-    if not BCACHE:
-        return None
-    return parse_sysfs_size_bytes(read(f"{BCACHE}/dirty_data"))
-
-
 def read_int_file(path):
     raw = read(path)
     if raw is None:
@@ -837,7 +979,7 @@ def read_int_file(path):
 def read_block_device_size_bytes(device_name):
     if not device_name:
         return None
-    sectors = read_int_file(f"/sys/block/{device_name}/size")
+    sectors = read_int_file(sysfs_path("class", "block", device_name, "size"))
     if sectors is None:
         return None
     return sectors * 512
@@ -853,9 +995,9 @@ def _decode_mount_field(value):
     )
 
 def _device_matches(candidate, device_name):
-    if not candidate or not device_name or not candidate.startswith("/dev/"):
+    if not candidate or not device_name or not candidate.startswith(f"{DEV_ROOT}/"):
         return False
-    target = os.path.realpath(f"/dev/{device_name}")
+    target = os.path.realpath(dev_path(device_name))
     real_candidate = os.path.realpath(candidate)
     return real_candidate == target or real_candidate.startswith(f"{target}p")
 
@@ -882,14 +1024,14 @@ def disk_usage_for_device(device_name):
         return None
     mount_candidates = []
     try:
-        with open("/proc/self/mountinfo", "r", encoding="utf-8") as src:
+        with open(proc_path("self", "mountinfo"), "r", encoding="utf-8") as src:
             mount_candidates = _parse_mountinfo_lines(src, device_name)
     except OSError:
         mount_candidates = []
 
     if not mount_candidates:
         try:
-            with open("/proc/mounts", "r", encoding="utf-8") as src:
+            with open(proc_path("mounts"), "r", encoding="utf-8") as src:
                 for line in src:
                     parts = line.split()
                     if len(parts) < 2:
@@ -928,8 +1070,101 @@ def discover_cache_set_path(bcache_path):
         if os.path.isdir(parent):
             return parent
 
-    candidates = sorted(glob.glob("/sys/fs/bcache/*"))
-    return candidates[0] if candidates else ""
+    selected_real = os.path.realpath(bcache_path)
+    for candidate in sorted(glob.glob(sysfs_path("fs", "bcache", "*"))):
+        for bdev_link in glob.glob(os.path.join(candidate, "bdev*")):
+            try:
+                if os.path.realpath(bdev_link) == selected_real:
+                    return candidate
+            except OSError:
+                continue
+    return ""
+
+
+def block_name_from_bcache_link(path):
+    if not path:
+        return ""
+    try:
+        real = os.path.realpath(path)
+    except OSError:
+        return ""
+    parent = os.path.dirname(real.rstrip(os.sep))
+    return os.path.basename(parent)
+
+
+def parent_block_device(device_name):
+    if not device_name:
+        return ""
+    class_path = sysfs_path("class", "block", device_name)
+    if read(os.path.join(class_path, "partition")) is None:
+        return device_name
+    try:
+        real = os.path.realpath(class_path)
+    except OSError:
+        return device_name
+    parent = os.path.basename(os.path.dirname(real))
+    return parent or device_name
+
+
+def leaf_block_devices(device_name, seen=None):
+    if not device_name:
+        return []
+    seen = set(seen or ())
+    if device_name in seen:
+        return []
+    seen.add(device_name)
+    slaves = [
+        os.path.basename(path)
+        for path in sorted(glob.glob(sysfs_path("class", "block", device_name, "slaves", "*")))
+    ]
+    if slaves:
+        leaves = []
+        for slave in slaves:
+            leaves.extend(leaf_block_devices(slave, seen))
+        return list(dict.fromkeys(leaves))
+    return [parent_block_device(device_name)]
+
+
+def discover_bcache_topology(device_name, bcache_path):
+    topology = BcacheTopology(device=device_name or "", bcache_path=bcache_path or "")
+    if not device_name or not bcache_path:
+        topology.errors.append("bcache device or sysfs path is missing")
+        return topology
+
+    topology.cache_set_path = discover_cache_set_path(bcache_path)
+    if not topology.cache_set_path:
+        topology.errors.append("associated cache set could not be resolved")
+
+    backing_name = read(os.path.join(bcache_path, "backing_dev_name"))
+    if backing_name:
+        backing_name = os.path.basename(backing_name.strip())
+    if not backing_name:
+        backing_name = block_name_from_bcache_link(bcache_path)
+        if backing_name == device_name:
+            backing_name = ""
+    topology.backing_device = backing_name or ""
+    if not topology.backing_device:
+        topology.errors.append("backing block device could not be resolved")
+
+    cache_blocks = []
+    if topology.cache_set_path:
+        for cache_link in sorted(glob.glob(os.path.join(topology.cache_set_path, "cache*"))):
+            name = block_name_from_bcache_link(cache_link)
+            if name:
+                cache_blocks.append(name)
+    topology.cache_block_devices = list(dict.fromkeys(cache_blocks))
+    if not topology.cache_block_devices:
+        topology.errors.append("cache block device could not be resolved")
+
+    health_devices = []
+    for cache_device in topology.cache_block_devices:
+        health_devices.extend(leaf_block_devices(cache_device))
+    topology.health_devices = list(dict.fromkeys(name for name in health_devices if name))
+    if not topology.health_devices:
+        topology.errors.append("physical cache device for health data could not be resolved")
+
+    topology.status = "ok" if not topology.errors else ("degraded" if topology.cache_set_path else "error")
+    return topology
 
 
 def read_cache_device_capacity(cache_set_path):
@@ -942,14 +1177,15 @@ def read_cache_device_capacity(cache_set_path):
         if bucket_size is not None and buckets is not None:
             capacities.append(bucket_size * buckets)
         else:
-            dev_name = os.path.basename(os.path.realpath(cache_path))
+            dev_name = block_name_from_bcache_link(cache_path)
             capacities.append(read_block_device_size_bytes(dev_name))
-    known = [value for value in capacities if value is not None]
-    return sum(known) if known else None
+    if not capacities or any(value is None for value in capacities):
+        return None
+    return sum(capacities)
 
 
 def read_block_device_stat(device_name):
-    raw = read(f"/sys/block/{device_name}/stat") if device_name else None
+    raw = read(sysfs_path("class", "block", device_name, "stat")) if device_name else None
     if not raw:
         return None
     parts = raw.split()
@@ -991,36 +1227,95 @@ def average_recent_io_rates(rate_history, now_ts, window_seconds=RATE_AVERAGE_SE
 
 
 def read_bcache_details(device_name, bcache_path):
-    cache_set_path = discover_cache_set_path(bcache_path)
-    dirty_bytes = dirty_val()
+    topology = discover_bcache_topology(device_name, bcache_path)
+    cache_set_path = topology.cache_set_path
+    metrics = {}
+
+    def collect(name, path, parser=None, unit=""):
+        metric = read_metric(path, parser=parser, unit=unit)
+        metrics[name] = metric
+        return metric.value if metric.status == "ok" else None
+
+    dirty_bytes = collect("dirty_bytes", os.path.join(bcache_path, "dirty_data"), parse_sysfs_size_bytes, "bytes")
     cache_capacity = read_cache_device_capacity(cache_set_path)
-    cache_available_percent = _parse_percent(read(f"{bcache_path}/cache_available_percent")) if bcache_path else None
+    metrics["cache_capacity"] = MetricValue(
+        value=cache_capacity,
+        unit="bytes",
+        source=cache_set_path,
+        status="ok" if cache_capacity is not None else "unavailable",
+        reason="" if cache_capacity is not None else "bucket_size/nbuckets unavailable",
+    )
+
+    cache_available_metric = read_metric(
+        os.path.join(bcache_path, "cache_available_percent"),
+        parser=_parse_percent,
+        unit="percent",
+    )
+    cache_available_percent = cache_available_metric.value if cache_available_metric.status == "ok" else None
     if cache_available_percent is None and cache_set_path:
-        cache_available_percent = _parse_percent(read(os.path.join(cache_set_path, "cache_available_percent")))
+        cache_available_metric = read_metric(
+            os.path.join(cache_set_path, "cache_available_percent"),
+            parser=_parse_percent,
+            unit="percent",
+        )
+        cache_available_percent = cache_available_metric.value if cache_available_metric.status == "ok" else None
+    metrics["cache_available_percent"] = cache_available_metric
 
     cache_available_bytes = None
     if cache_capacity is not None and cache_available_percent is not None:
         cache_available_bytes = cache_capacity * (cache_available_percent / 100.0)
 
     backing_size = read_block_device_size_bytes(device_name)
+    metrics["backing_size"] = MetricValue(
+        value=backing_size,
+        unit="bytes",
+        source=sysfs_path("class", "block", device_name, "size"),
+        status="ok" if backing_size is not None else "unavailable",
+        reason="" if backing_size is not None else "block device size unavailable",
+    )
     fs_usage = disk_usage_for_device(device_name)
-    writeback_rate_sectors = read_int_file(f"{bcache_path}/writeback_rate") if bcache_path else None
-    writeback_rate_bytes = writeback_rate_sectors * 512 if writeback_rate_sectors is not None else None
+    metrics["fs_usage"] = MetricValue(
+        value=fs_usage,
+        source=fs_usage.get("mountpoint", "") if fs_usage else "",
+        status="ok" if fs_usage else "unavailable",
+        reason="" if fs_usage else "no matching mount point",
+    )
+    writeback_rate_bytes = collect(
+        "writeback_rate_bytes",
+        os.path.join(bcache_path, "writeback_rate"),
+        parse_sysfs_size_bytes,
+        "bytes_per_second",
+    )
+    cache_mode = collect("cache_mode", os.path.join(bcache_path, "cache_mode"))
+    writeback_percent = collect("writeback_percent", os.path.join(bcache_path, "writeback_percent"))
+    writeback_running = collect("writeback_running", os.path.join(bcache_path, "writeback_running"))
+    device_stat = read_block_device_stat(topology.backing_device)
+    metrics["device_stat"] = MetricValue(
+        value=device_stat,
+        unit="sectors",
+        source=sysfs_path("class", "block", topology.backing_device, "stat") if topology.backing_device else "",
+        status="ok" if device_stat is not None else "unavailable",
+        reason="" if device_stat is not None else "backing device stat unavailable",
+    )
 
     return {
-        "cache_mode": read(f"{bcache_path}/cache_mode") if bcache_path else None,
+        "cache_mode": cache_mode,
         "cache_capacity": cache_capacity,
         "cache_available_percent": cache_available_percent,
         "cache_available_bytes": cache_available_bytes,
         "dirty_bytes": dirty_bytes,
         "backing_size": backing_size,
         "fs_usage": fs_usage,
-        "writeback_percent": read(f"{bcache_path}/writeback_percent") if bcache_path else None,
+        "writeback_percent": writeback_percent,
         "writeback_rate_bytes": writeback_rate_bytes,
-        "writeback_running": read(f"{bcache_path}/writeback_running") if bcache_path else None,
+        "writeback_running": writeback_running,
         "cache_set_path": cache_set_path,
-        "device_stat": read_block_device_stat(device_name),
-        "cache_devices": discover_cache_device_names(cache_set_path),
+        "device_stat": device_stat,
+        "backing_device": topology.backing_device,
+        "cache_devices": topology.health_devices,
+        "cache_block_devices": topology.cache_block_devices,
+        "topology": topology,
+        "_metrics": metrics,
     }
 
 
@@ -1030,49 +1325,203 @@ def discover_cache_device_names(cache_set_path):
         return []
     devices = []
     for cache_path in sorted(glob.glob(os.path.join(cache_set_path, "cache*"))):
-        real = os.path.realpath(cache_path)
-        name = os.path.basename(real)
-        if name and name.startswith(("sd", "nvme", "vd", "xvd")):
-            devices.append(name)
-    return devices
+        name = block_name_from_bcache_link(cache_path)
+        if name:
+            devices.extend(leaf_block_devices(name))
+    return list(dict.fromkeys(devices))
+
+
+SSD_HEALTH_VALUE_KEYS = (
+    "available_spare_percent",
+    "wear_used_percent",
+    "life_remaining_percent",
+    "temperature_c",
+    "tbw_bytes",
+)
+
+
+def empty_ssd_health_values():
+    return {key: None for key in SSD_HEALTH_VALUE_KEYS}
+
+
+def _number(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    token = str(value).strip().replace(",", "")
+    match = re.search(r"[-+]?\d+(?:\.\d+)?", token)
+    if not match:
+        return None
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return None
+
+
+def _int_number(value):
+    number = _number(value)
+    return None if number is None else int(number)
+
+
+def _normalized_attribute_name(value):
+    return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+
+
+def _apply_life_remaining(health, value):
+    pct = _number(value)
+    if pct is not None and 0 <= pct <= 100:
+        health["life_remaining_percent"] = pct
+
+
+def parse_smart_health_json(stdout):
+    health = empty_ssd_health_values()
+    try:
+        data = json.loads(str(stdout or ""))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return health
+    if not isinstance(data, dict):
+        return health
+
+    nvme = data.get("nvme_smart_health_information_log")
+    if not isinstance(nvme, dict):
+        nvme = data
+    used = None
+    for key in ("percentage_used", "percent_used"):
+        if key in nvme:
+            used = _number(nvme.get(key))
+            break
+    if used is not None and 0 <= used <= 100:
+        health["wear_used_percent"] = used
+        health["life_remaining_percent"] = max(0.0, 100.0 - used)
+
+    spare = _number(nvme.get("available_spare", nvme.get("avail_spare")))
+    if spare is not None and 0 <= spare <= 100:
+        health["available_spare_percent"] = spare
+
+    temperature = None
+    temp_obj = data.get("temperature")
+    if isinstance(temp_obj, dict):
+        temperature = _number(temp_obj.get("current"))
+    elif temp_obj is not None:
+        temperature = _number(temp_obj)
+    if temperature is None:
+        temperature = _number(nvme.get("temperature"))
+    if temperature is not None and -50 <= temperature <= 200:
+        health["temperature_c"] = temperature
+
+    data_units_written = _int_number(nvme.get("data_units_written"))
+    if data_units_written is not None and data_units_written >= 0:
+        health["tbw_bytes"] = data_units_written * 512000
+
+    logical_block_size = _int_number(data.get("logical_block_size")) or 512
+    attrs = data.get("ata_smart_attributes", {}).get("table", [])
+    if isinstance(attrs, list):
+        for attr in attrs:
+            if not isinstance(attr, dict):
+                continue
+            name = _normalized_attribute_name(attr.get("name"))
+            raw_obj = attr.get("raw")
+            raw_value = raw_obj.get("value") if isinstance(raw_obj, dict) else raw_obj
+            normalized_value = _number(attr.get("value"))
+
+            if name in {
+                "percent_lifetime_remain",
+                "percent_life_remaining",
+                "remaining_lifetime_perc",
+                "ssd_life_left",
+                "media_wearout_indicator",
+            }:
+                candidate = raw_value if "percent" in name or name == "ssd_life_left" else normalized_value
+                if _number(candidate) is None or not (0 <= _number(candidate) <= 100):
+                    candidate = normalized_value
+                _apply_life_remaining(health, candidate)
+            elif name in {"percentage_used", "percent_used"}:
+                wear = _number(raw_value)
+                if wear is not None and 0 <= wear <= 100:
+                    health["wear_used_percent"] = wear
+                    health["life_remaining_percent"] = max(0.0, 100.0 - wear)
+
+            if health["temperature_c"] is None and "temperature" in name:
+                temp = _number(raw_value)
+                if temp is not None and -50 <= temp <= 200:
+                    health["temperature_c"] = temp
+            if name in {"total_lbas_written", "host_writes_32mib", "host_writes_mib"}:
+                total = _int_number(raw_value)
+                if total is not None and total >= 0:
+                    if name == "host_writes_32mib":
+                        health["tbw_bytes"] = total * 32 * 1024 ** 2
+                    elif name == "host_writes_mib":
+                        health["tbw_bytes"] = total * 1024 ** 2
+                    else:
+                        health["tbw_bytes"] = total * logical_block_size
+    return health
 
 
 def parse_smart_health_text(stdout):
-    health = {"available_spare_percent": None, "wear_used_percent": None, "life_remaining_percent": None, "temperature_c": None, "tbw_bytes": None}
+    health = empty_ssd_health_values()
     for line in str(stdout or "").splitlines():
-        lower = line.lower()
-        _, sep, rhs = line.partition(":")
-        if not sep:
+        stripped = line.strip()
+        lower = stripped.lower()
+        _, sep, rhs = stripped.partition(":")
+        if sep:
+            value = rhs.strip().replace(",", "")
+            first = value.split()[0] if value.split() else value
+            if "percentage used" in lower or "percent used" in lower:
+                wear = _parse_percent(first)
+                if wear is not None and 0 <= wear <= 100:
+                    health["wear_used_percent"] = wear
+                    health["life_remaining_percent"] = max(0.0, 100.0 - wear)
+            elif "available spare" in lower and "threshold" not in lower:
+                spare = _parse_percent(first)
+                if spare is not None and 0 <= spare <= 100:
+                    health["available_spare_percent"] = spare
+            elif "temperature" in lower and health["temperature_c"] is None:
+                temp = _number(value.replace("Celsius", "").replace("°C", ""))
+                if temp is not None and -50 <= temp <= 200:
+                    health["temperature_c"] = temp
+            elif "data units written" in lower:
+                units = _int_number(first)
+                if units is not None:
+                    health["tbw_bytes"] = units * 512000
+            elif "total_lbas_written" in lower:
+                lbas = _int_number(first)
+                if lbas is not None:
+                    health["tbw_bytes"] = lbas * 512
             continue
-        value = rhs.strip().replace(",", "")
-        if "percentage used" in lower or "wear_leveling_count" in lower or "wear leveling count" in lower:
-            pct = _parse_percent(value.split()[0] if value.split() else value)
-            if pct is not None:
-                health["wear_used_percent"] = pct
-        elif "available spare" in lower and "threshold" not in lower:
-            health["available_spare_percent"] = _parse_percent(value.split()[0] if value.split() else value)
-        elif "temperature" in lower and health["temperature_c"] is None:
-            parts = value.replace("Celsius", "").replace("°C", "").split()
-            try:
-                health["temperature_c"] = float(parts[0])
-            except (ValueError, IndexError):
-                pass
-        elif "data units written" in lower:
-            try:
-                units = int(value.split()[0])
-                health["tbw_bytes"] = units * 512000
-            except (ValueError, IndexError):
-                pass
-        elif "total_lbas_written" in lower:
-            try:
-                health["tbw_bytes"] = int(value.split()[0]) * 512
-            except (ValueError, IndexError):
-                pass
-    if health["wear_used_percent"] is not None:
-        health["life_remaining_percent"] = max(0.0, 100.0 - health["wear_used_percent"])
-    elif health["available_spare_percent"] is not None:
-        health["life_remaining_percent"] = health["available_spare_percent"]
+
+        parts = stripped.split()
+        if len(parts) < 4 or not parts[0].isdigit():
+            continue
+        name = _normalized_attribute_name(parts[1])
+        normalized_value = _number(parts[3])
+        raw_text = " ".join(parts[9:]) if len(parts) > 9 else parts[-1]
+        raw_value = _number(raw_text)
+        if name in {
+            "percent_lifetime_remain",
+            "percent_life_remaining",
+            "remaining_lifetime_perc",
+            "ssd_life_left",
+        }:
+            candidate = raw_value if raw_value is not None and 0 <= raw_value <= 100 else normalized_value
+            _apply_life_remaining(health, candidate)
+        elif name == "media_wearout_indicator":
+            _apply_life_remaining(health, normalized_value)
+        elif name in {"percentage_used", "percent_used"} and raw_value is not None and 0 <= raw_value <= 100:
+            health["wear_used_percent"] = raw_value
+            health["life_remaining_percent"] = max(0.0, 100.0 - raw_value)
+        if health["temperature_c"] is None and "temperature" in name:
+            if raw_value is not None and -50 <= raw_value <= 200:
+                health["temperature_c"] = raw_value
+        if name == "total_lbas_written" and raw_value is not None:
+            health["tbw_bytes"] = int(raw_value) * 512
+        elif name == "host_writes_32mib" and raw_value is not None:
+            health["tbw_bytes"] = int(raw_value) * 32 * 1024 ** 2
     return health
+
+
+def ssd_health_has_data(health):
+    return any((health or {}).get(key) is not None for key in SSD_HEALTH_VALUE_KEYS)
 
 
 def missing_dependency_hint(command_name, config_or_state=None):
@@ -1091,46 +1540,143 @@ def smart_dependency_hint(cache_device_names, attempted_tools=None, last_status=
         return missing_dependency_hint(preferred)
     if last_status.startswith("ERR:"):
         return f"{preferred} is installed but returned {last_status}; run as root or adjust device permissions."
+    if last_status.startswith("OS ERROR:"):
+        return f"{preferred} could not access the device ({last_status}); check permissions and device support."
     if last_status == "TIMEOUT":
         return f"{preferred} timed out while reading SSD health values."
     return f"SSD health unavailable; verify {preferred} access and device support."
 
 
 def base_ssd_health(cache_device_names, source="unavailable", dependency_hint=""):
-    return {
+    health = {
         "device": cache_device_names[0] if cache_device_names else "",
+        "devices": [],
         "source": source,
         "dependency_hint": dependency_hint,
-        "available_spare_percent": None,
-        "wear_used_percent": None,
-        "life_remaining_percent": None,
-        "temperature_c": None,
-        "tbw_bytes": None,
+        "field_reasons": {},
+        "attempts": [],
     }
+    health.update(empty_ssd_health_values())
+    return health
+
+
+def _smartctl_result_usable(result):
+    returncode = result.get("returncode")
+    return (
+        returncode is not None
+        and (returncode & 0b00000111) == 0
+        and bool(result.get("stdout"))
+    )
+
+
+def _device_is_usb(device_name):
+    try:
+        return "/usb" in os.path.realpath(sysfs_path("class", "block", device_name)).replace("\\", "/")
+    except OSError:
+        return False
+
+
+def _read_one_ssd_health(device_name):
+    device = dev_path(device_name)
+    attempts = []
+    last_status = ""
+
+    if device_name.startswith("nvme"):
+        result = _run_command(["nvme", "smart-log", device, "-o", "json"], timeout=3.0)
+        attempts.append({"device": device, "tool": "nvme", "status": result["status"]})
+        last_status = result["status"]
+        if result["ok"]:
+            health = parse_smart_health_json(result["stdout"])
+            if ssd_health_has_data(health):
+                health.update({"device": device, "source": "nvme-json", "attempts": attempts})
+                return health
+
+    smart_commands = [
+        ["smartctl", "-a", "-j", "-q", "noserial", device],
+        ["smartctl", "-a", "-q", "noserial", device],
+    ]
+    if _device_is_usb(device_name):
+        smart_commands.extend([
+            ["smartctl", "-a", "-j", "-q", "noserial", "-d", "sat", device],
+            ["smartctl", "-a", "-q", "noserial", "-d", "sat", device],
+        ])
+
+    for command in smart_commands:
+        result = _run_command(command, timeout=3.0)
+        attempts.append({
+            "device": device,
+            "tool": "smartctl",
+            "status": result["status"],
+            "mode": "json" if "-j" in command else "text",
+        })
+        last_status = result["status"]
+        if not _smartctl_result_usable(result):
+            if result["status"] == "NOT INSTALLED":
+                break
+            continue
+        health = parse_smart_health_json(result["stdout"]) if "-j" in command else parse_smart_health_text(result["stdout"])
+        if ssd_health_has_data(health):
+            health.update({
+                "device": device,
+                "source": "smartctl-json" if "-j" in command else "smartctl-text",
+                "attempts": attempts,
+            })
+            return health
+
+    preferred_tool = "nvme" if device_name.startswith("nvme") else "smartctl"
+    preferred_statuses = [item["status"] for item in attempts if item["tool"] == preferred_tool]
+    hint_status = preferred_statuses[-1] if preferred_statuses else last_status
+    missing = base_ssd_health(
+        [device_name],
+        dependency_hint=smart_dependency_hint(
+            [device_name],
+            [item["tool"] for item in attempts],
+            hint_status,
+        ),
+    )
+    missing.update({"device": device, "attempts": attempts})
+    return missing
 
 
 def read_ssd_health(cache_device_names):
     names = list(cache_device_names or [])
-    attempted_tools = []
-    last_status = ""
-    for name in names:
-        dev_path = f"/dev/{name}"
-        if name.startswith("nvme"):
-            attempted_tools.append("nvme")
-            result = _run_command(["nvme", "smart-log", dev_path], timeout=2.5)
-            last_status = result["status"]
-            if result["ok"]:
-                health = parse_smart_health_text(result["stdout"])
-                health.update({"device": dev_path, "source": "nvme", "dependency_hint": ""})
-                return health
-        attempted_tools.append("smartctl")
-        result = _run_command(["smartctl", "-A", dev_path], timeout=2.5)
-        last_status = result["status"]
-        if result["ok"]:
-            health = parse_smart_health_text(result["stdout"])
-            health.update({"device": dev_path, "source": "smartctl", "dependency_hint": ""})
-            return health
-    return base_ssd_health(names, dependency_hint=smart_dependency_hint(names, attempted_tools, last_status))
+    if not names:
+        return base_ssd_health([], dependency_hint=smart_dependency_hint([]))
+
+    per_device = [_read_one_ssd_health(name) for name in names]
+    result = base_ssd_health(names)
+    result["device"] = ", ".join(item.get("device", "") for item in per_device if item.get("device"))
+    result["devices"] = per_device
+    result["source"] = ",".join(sorted({item.get("source", "") for item in per_device if item.get("source") and item.get("source") != "unavailable"})) or "unavailable"
+    result["attempts"] = [attempt for item in per_device for attempt in item.get("attempts", [])]
+
+    life_values = [item["life_remaining_percent"] for item in per_device if item.get("life_remaining_percent") is not None]
+    temp_values = [item["temperature_c"] for item in per_device if item.get("temperature_c") is not None]
+    tbw_values = [item["tbw_bytes"] for item in per_device if item.get("tbw_bytes") is not None]
+    spare_values = [item["available_spare_percent"] for item in per_device if item.get("available_spare_percent") is not None]
+    wear_values = [item["wear_used_percent"] for item in per_device if item.get("wear_used_percent") is not None]
+    result["life_remaining_percent"] = min(life_values) if life_values else None
+    result["temperature_c"] = max(temp_values) if temp_values else None
+    result["tbw_bytes"] = sum(tbw_values) if tbw_values else None
+    result["available_spare_percent"] = min(spare_values) if spare_values else None
+    result["wear_used_percent"] = max(wear_values) if wear_values else None
+    result["partial_fields"] = [
+        key
+        for key, values in (
+            ("life_remaining_percent", life_values),
+            ("temperature_c", temp_values),
+            ("tbw_bytes", tbw_values),
+        )
+        if values and len(values) < len(per_device)
+    ]
+    missing_hints = list(dict.fromkeys(item.get("dependency_hint", "") for item in per_device if item.get("dependency_hint")))
+    result["dependency_hint"] = "; ".join(missing_hints)
+    result["field_reasons"] = {
+        key: result["dependency_hint"] or "device does not expose a reliable value"
+        for key in ("life_remaining_percent", "temperature_c", "tbw_bytes")
+        if result.get(key) is None
+    }
+    return result
 
 
 def dependency_warnings(smart_health=None, docker_state="", config_or_state=None):
@@ -1181,6 +1727,13 @@ def format_duration(seconds):
 
 
 def health_report(eff, details, smart_health, hps=0, mps=0):
+    if not details.get("_core_available", True) or eff is None or details.get("cache_mode") is None:
+        return {
+            "score": None,
+            "status": "DATA INCOMPLETE",
+            "warnings": ["Core bcache values are incomplete; health score suppressed"],
+            "data_complete": False,
+        }
     score = 100
     warnings = []
     mode = format_cache_mode(details.get("cache_mode"))
@@ -1208,10 +1761,12 @@ def health_report(eff, details, smart_health, hps=0, mps=0):
         score -= 10; warnings.append("Large dirty data backlog")
     score = max(0, min(100, int(score)))
     status = "HEALTHY" if score >= 80 else ("WARNING" if score >= 50 else ("CRITICAL" if score >= 20 else "FAILURE"))
-    return {"score": score, "status": status, "warnings": warnings or ["No major issues detected"]}
+    return {"score": score, "status": status, "warnings": warnings or ["No major issues detected"], "data_complete": True}
 
 
 def recommendations(eff, details, smart_health):
+    if not details.get("_core_available", True) or eff is None:
+        return ["Core bcache values are incomplete; no tuning recommendation generated."]
     recs = []
     mode = format_cache_mode(details.get("cache_mode"))
     if mode == "none":
@@ -1220,7 +1775,10 @@ def recommendations(eff, details, smart_health):
         recs.append("Hit rate is low: check working-set size, cache_available_percent, and sequential_cutoff.")
     elif eff < 80:
         recs.append("Hit rate is below ideal: compare recent workload with historical CSV data.")
-    flush_seconds = estimate_flush_seconds(details.get("dirty_bytes"), details.get("writeback_rate_bytes"))
+    flush_seconds = estimate_flush_seconds(
+        details.get("dirty_bytes"),
+        details.get("writeback_rate_bytes") or details.get("backing_write_rate_bytes"),
+    )
     if mode == "writeback" and flush_seconds is None and details.get("dirty_bytes"):
         recs.append("Dirty data cannot be drained estimate: writeback_rate is unavailable or zero.")
     life = smart_health.get("life_remaining_percent") if smart_health else None
@@ -1236,23 +1794,6 @@ def recommendations(eff, details, smart_health):
 def average(values):
     vals = [float(v) for v in (values or []) if v is not None]
     return sum(vals) / len(vals) if vals else 0.0
-
-
-def performance_comparison(before_eff, after_eff):
-    if before_eff is None or after_eff is None:
-        return {
-            "before": before_eff,
-            "after": after_eff,
-            "delta": None,
-            "summary": "Not enough data for before/after comparison.",
-        }
-    delta = after_eff - before_eff
-    return {
-        "before": before_eff,
-        "after": after_eff,
-        "delta": delta,
-        "summary": f"Before {before_eff:.0f}% -> after {after_eff:.0f}% ({delta:+.0f}%).",
-    }
 
 
 def detect_anomalies(write_history, current_write_rate, multiplier=4.0, minimum_baseline=50 * 1024 * 1024):
@@ -1297,39 +1838,10 @@ def docker_top_io(docker_io_rates, limit=3):
     return rows[:limit]
 
 
-def cache_size_advice(details):
-    cache_bytes = details.get("cache_capacity") or details.get("cache_size_bytes") or 0
-    backing_bytes = details.get("backing_size") or 0
-    if cache_bytes <= 0 or backing_bytes <= 0:
-        return {
-            "status": "unknown",
-            "message": "Cache-size advice needs readable cache and backing sizes.",
-        }
-    recommended = max(64 * 1024 ** 3, min(256 * 1024 ** 3, int(backing_bytes * 0.10)))
-    delta = cache_bytes - recommended
-    if abs(delta) < 8 * 1024 ** 3:
-        status = "ok"
-        message = f"Cache size looks balanced ({format_bytes(cache_bytes)})."
-    elif delta > 0:
-        status = "oversized"
-        message = (
-            f"Cache may be oversized: {format_bytes(cache_bytes)} current, "
-            f"{format_bytes(recommended)} recommended, {format_bytes(delta)} potential saving."
-        )
-    else:
-        status = "undersized"
-        message = f"Cache may be too small: {format_bytes(cache_bytes)} current, {format_bytes(recommended)} recommended."
-    return {
-        "status": status,
-        "current_bytes": cache_bytes,
-        "recommended_bytes": recommended,
-        "delta_bytes": delta,
-        "message": message,
-    }
-
-
 def maintenance_guard(details, smart_health):
     blockers = []
+    if not details.get("_core_available", True):
+        blockers.append("core bcache values are incomplete")
     dirty = details.get("dirty_bytes") or 0
     if dirty > 0:
         blockers.append(f"{format_bytes(dirty)} dirty data present")
@@ -1345,50 +1857,15 @@ def maintenance_guard(details, smart_health):
     return {"safe": not blockers, "blockers": blockers, "message": message}
 
 
-def life_prediction(smart_health, years_at_current_rate=2.8):
-    life = smart_health.get("life_remaining_percent") if smart_health else None
-    if life is None:
-        return "SSD lifetime prediction needs SMART/NVMe life data."
-    if life <= 0:
-        return "SSD life appears exhausted; replace immediately."
-    estimated_years = max(0.1, (life / 100.0) * years_at_current_rate / 0.7)
-    return f"Estimated remaining SSD lifetime: about {estimated_years:.1f} years (trend estimate, verify with SMART history)."
-
-
-def auto_tuning_suggestions(eff, details, anomaly=None):
-    suggestions = []
-    mode = format_cache_mode(details.get("cache_mode"))
-    wb_pct = _parse_percent(details.get("writeback_percent"))
-    if eff < 80:
-        suggestions.append({
-            "setting": "sequential_cutoff",
-            "from": "current",
-            "to": "higher (for example 16M)",
-            "reason": "Improve hit rate when sequential reads bypass cache too aggressively.",
-        })
-    if mode == "writeback" and wb_pct is not None and wb_pct < 20 and not (anomaly or {}).get("anomaly"):
-        suggestions.append({
-            "setting": "writeback_percent",
-            "from": str(int(wb_pct)),
-            "to": "20",
-            "reason": "Allow more writeback buffering when dirty-data risk is low.",
-        })
-    if mode in ("none", "N/A"):
-        suggestions.append({
-            "setting": "cache_mode",
-            "from": mode,
-            "to": "writethrough/writeback",
-            "reason": "Cache is inactive.",
-        })
-    return suggestions or [{
-        "setting": "none",
-        "from": "-",
-        "to": "-",
-        "reason": "No tuning change recommended from current snapshot.",
-    }]
-
-
 def automatic_diagnosis(eff_history, eff, hps, mps, details, smart_health, docker_io_rates=None):
+    if not details.get("_core_available", True):
+        return {
+            "problem": True,
+            "previous_eff": None,
+            "current_eff": eff,
+            "causes": [(False, "Core bcache values are incomplete")],
+            "recommendation": "Run --diagnose and fix the reported data source before tuning bcache.",
+        }
     previous = average(list(eff_history or [])[:-1]) if eff_history and len(eff_history) > 1 else None
     causes = []
     if mps > hps and (hps + mps) > 0:
@@ -1402,7 +1879,11 @@ def automatic_diagnosis(eff_history, eff, hps, mps, details, smart_health, docke
     if smart_health and smart_health.get("temperature_c") and smart_health["temperature_c"] > 60:
         causes.append((False, "Cache SSD temperature is high"))
     problem = eff < 70 or (previous is not None and eff < previous * 0.65)
-    recommendation = "Increase sequential_cutoff and compare before/after hit rate." if eff < 80 else "Continue monitoring; no immediate action required."
+    recommendation = (
+        "Inspect workload and sequential_cutoff; change it only after confirming sequential bypass."
+        if eff < 80 else
+        "Continue monitoring; no immediate action required."
+    )
     if details.get("dirty_bytes"):
         recommendation = "Wait for dirty data to drain before risky maintenance."
     return {
@@ -1414,34 +1895,6 @@ def automatic_diagnosis(eff_history, eff, hps, mps, details, smart_health, docke
     }
 
 
-def raspberry_pi_status():
-    uasp = "unknown"
-    try:
-        drivers = []
-        for path in glob.glob("/sys/bus/usb/drivers/*"):
-            drivers.append(os.path.basename(path).lower())
-        if "uas" in drivers:
-            uasp = "yes"
-    except OSError:
-        pass
-    temp = None
-    raw = read("/sys/class/thermal/thermal_zone0/temp")
-    if raw:
-        try:
-            temp = float(raw) / 1000.0
-        except ValueError:
-            temp = None
-    io_wait = None
-    try:
-        with open('/proc/stat', 'r', encoding='utf-8') as src:
-            parts = src.readline().split()
-        vals = [int(x) for x in parts[1:]]
-        total = sum(vals)
-        io_wait = (vals[4] / total * 100.0) if total else None
-    except (OSError, ValueError, IndexError):
-        pass
-    return {"uasp": uasp, "cpu_temp_c": temp, "io_wait_percent": io_wait}
-
 def append_history_sample(path, device, eff, details, smart_health, now_ts=None):
     now_ts = now_ts or time.time()
     directory = os.path.dirname(path)
@@ -1452,20 +1905,48 @@ def append_history_sample(path, device, eff, details, smart_health, now_ts=None)
         writer = csv.writer(dst)
         if not exists:
             writer.writerow(["timestamp", "device", "hit_rate_percent", "dirty_bytes", "cache_mode", "ssd_life_percent", "ssd_temp_c"])
-        writer.writerow([int(now_ts), device or "", f"{eff:.2f}", details.get("dirty_bytes") or 0, format_cache_mode(details.get("cache_mode")), smart_health.get("life_remaining_percent") if smart_health else "", smart_health.get("temperature_c") if smart_health else ""])
+        writer.writerow([
+            int(now_ts),
+            device or "",
+            f"{eff:.2f}" if eff is not None else "",
+            details.get("dirty_bytes") if details.get("dirty_bytes") is not None else "",
+            format_cache_mode(details.get("cache_mode")) if details.get("cache_mode") is not None else "",
+            smart_health.get("life_remaining_percent") if smart_health else "",
+            smart_health.get("temperature_c") if smart_health else "",
+        ])
 
 
-def prometheus_metrics(device, eff, details, smart_health, report):
-    labels = f'device="{device or "unknown"}"'
+def _prometheus_escape(value):
+    return str(value).replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+
+
+def prometheus_metrics(device, eff, details, smart_health, report, collector_status=None):
+    labels = f'device="{_prometheus_escape(device or "unknown")}"'
     mode = format_cache_mode(details.get("cache_mode"))
     mode_state = 0 if mode in ("none", "N/A") else 1
     lines = [
-        f"bcache_hit_ratio{{{labels}}} {eff / 100.0:.6f}",
-        f"bcache_dirty_bytes{{{labels}}} {details.get('dirty_bytes') or 0}",
-        f"bcache_cache_available_percent{{{labels}}} {details.get('cache_available_percent') if details.get('cache_available_percent') is not None else -1}",
-        f"bcache_state{{{labels},mode=\"{mode}\"}} {mode_state}",
-        f"bcache_health_score{{{labels}}} {report.get('score', 0)}",
+        "# HELP bcache_monitor_info Build information for bcache-monitor.",
+        "# TYPE bcache_monitor_info gauge",
+        f'bcache_monitor_info{{{labels},version="{_prometheus_escape(__version__)}"}} 1',
     ]
+    if eff is not None:
+        lines.extend([
+            "# HELP bcache_hit_ratio Lifetime bcache hit ratio.",
+            "# TYPE bcache_hit_ratio gauge",
+            f"bcache_hit_ratio{{{labels}}} {eff / 100.0:.6f}",
+        ])
+    if details.get("dirty_bytes") is not None:
+        lines.extend([
+            "# HELP bcache_dirty_bytes Dirty data waiting for writeback.",
+            "# TYPE bcache_dirty_bytes gauge",
+            f"bcache_dirty_bytes{{{labels}}} {details['dirty_bytes']}",
+        ])
+    if details.get("cache_available_percent") is not None:
+        lines.append(f"bcache_cache_available_percent{{{labels}}} {details['cache_available_percent']}")
+    if details.get("cache_mode") is not None:
+        lines.append(f'bcache_state{{{labels},mode="{_prometheus_escape(mode)}"}} {mode_state}')
+    if report.get("score") is not None:
+        lines.append(f"bcache_health_score{{{labels}}} {report['score']}")
     if smart_health:
         if smart_health.get("life_remaining_percent") is not None:
             lines.append(f"bcache_ssd_life_remaining_percent{{{labels}}} {smart_health['life_remaining_percent']}")
@@ -1473,7 +1954,204 @@ def prometheus_metrics(device, eff, details, smart_health, report):
             lines.append(f"bcache_ssd_temperature_celsius{{{labels}}} {smart_health['temperature_c']}")
         if smart_health.get("tbw_bytes") is not None:
             lines.append(f"bcache_ssd_total_bytes_written{{{labels}}} {smart_health['tbw_bytes']}")
+    statuses = collector_status or {
+        "sysfs": bool(details.get("_core_available", True)),
+        "topology": getattr(details.get("topology"), "status", "ok") == "ok",
+        "smart": ssd_health_has_data(smart_health),
+    }
+    lines.extend([
+        "# HELP bcache_monitor_collector_success Whether a collector produced usable data.",
+        "# TYPE bcache_monitor_collector_success gauge",
+    ])
+    for collector in ("sysfs", "topology", "smart"):
+        lines.append(
+            f'bcache_monitor_collector_success{{{labels},collector="{collector}"}} '
+            f'{1 if statuses.get(collector) else 0}'
+        )
     return "\n".join(lines) + "\n"
+
+
+def empty_bcache_details():
+    return {
+        "cache_mode": None,
+        "cache_capacity": None,
+        "cache_available_percent": None,
+        "cache_available_bytes": None,
+        "dirty_bytes": None,
+        "backing_size": None,
+        "fs_usage": None,
+        "writeback_percent": None,
+        "writeback_rate_bytes": None,
+        "writeback_running": None,
+        "cache_set_path": "",
+        "device_stat": None,
+        "backing_device": "",
+        "cache_devices": [],
+        "cache_block_devices": [],
+        "topology": BcacheTopology(),
+        "_metrics": {},
+        "_core_available": False,
+    }
+
+
+def collect_monitor_snapshot(config=None, include_smart=True):
+    if config is None:
+        config = load_config(create_if_missing=False)[0]
+    resolution = resolve_bcache_device(config.get("bcache_device", ""))
+    global BCACHE
+    BCACHE = resolution.get("path") or ""
+    hits, misses = stats(BCACHE) if BCACHE else (None, None)
+    core_available = hits is not None and misses is not None
+    details = read_bcache_details(resolution.get("device"), BCACHE) if BCACHE else empty_bcache_details()
+    details["_core_available"] = core_available
+    efficiency = (
+        hits / (hits + misses) * 100.0
+        if core_available and (hits + misses)
+        else (0.0 if core_available else None)
+    )
+    smart_health = (
+        read_ssd_health(details.get("cache_devices", []))
+        if include_smart
+        else base_ssd_health(details.get("cache_devices", []), dependency_hint="SMART collection skipped")
+    )
+    report = health_report(efficiency, details, smart_health)
+    topology = details.get("topology") or BcacheTopology()
+    collector_status = {
+        "sysfs": core_available,
+        "topology": topology.status == "ok",
+        "smart": ssd_health_has_data(smart_health),
+    }
+    optional_metric_missing = any(
+        metric.status != "ok"
+        for metric in details.get("_metrics", {}).values()
+    )
+    if not resolution.get("path") or not core_available:
+        overall_status = "failed"
+        exit_code = 2
+    elif optional_metric_missing or not collector_status["topology"] or not collector_status["smart"] or any(
+        smart_health.get(key) is None for key in ("life_remaining_percent", "temperature_c", "tbw_bytes")
+    ):
+        overall_status = "degraded"
+        exit_code = 1
+    else:
+        overall_status = "ok"
+        exit_code = 0
+    return {
+        "config": config,
+        "resolution": resolution,
+        "hits": hits,
+        "misses": misses,
+        "efficiency": efficiency,
+        "details": details,
+        "smart_health": smart_health,
+        "report": report,
+        "collector_status": collector_status,
+        "status": overall_status,
+        "exit_code": exit_code,
+    }
+
+
+def diagnostic_payload(snapshot):
+    details = snapshot["details"]
+    metrics = {
+        name: metric.as_dict()
+        for name, metric in details.get("_metrics", {}).items()
+    }
+    metrics["cache_hits"] = MetricValue(
+        value=snapshot["hits"],
+        unit="operations",
+        source=os.path.join(STATS_TOTAL_PATH or snapshot["resolution"].get("path") or "", "cache_hits"),
+        status="ok" if snapshot["hits"] is not None else "unavailable",
+        reason="" if snapshot["hits"] is not None else "counter unavailable",
+    ).as_dict()
+    metrics["cache_misses"] = MetricValue(
+        value=snapshot["misses"],
+        unit="operations",
+        source=os.path.join(STATS_TOTAL_PATH or snapshot["resolution"].get("path") or "", "cache_misses"),
+        status="ok" if snapshot["misses"] is not None else "unavailable",
+        reason="" if snapshot["misses"] is not None else "counter unavailable",
+    ).as_dict()
+    if snapshot["efficiency"] is not None:
+        metrics["hit_ratio_percent"] = MetricValue(
+            value=snapshot["efficiency"],
+            unit="percent",
+            source="derived from cache_hits/cache_misses",
+            status="ok",
+        ).as_dict()
+
+    smart = snapshot["smart_health"]
+    for key, unit in (
+        ("life_remaining_percent", "percent"),
+        ("temperature_c", "celsius"),
+        ("tbw_bytes", "bytes"),
+    ):
+        metrics[f"ssd_{key}"] = MetricValue(
+            value=smart.get(key),
+            unit=unit,
+            source=smart.get("source", ""),
+            status="ok" if smart.get(key) is not None else "unavailable",
+            reason=(
+                "aggregated from only the devices that exposed this field"
+                if key in smart.get("partial_fields", [])
+                else smart.get("field_reasons", {}).get(key) or smart.get("dependency_hint", "")
+            ),
+        ).as_dict()
+
+    topology = details.get("topology") or BcacheTopology()
+    dependencies = {
+        item["command"]: {"installed": item["installed"], "status": item["status"]}
+        for item in check_optional_dependencies()
+    }
+    return {
+        "schema_version": 1,
+        "version": __version__,
+        "status": snapshot["status"],
+        "device": snapshot["resolution"].get("device"),
+        "device_source": snapshot["resolution"].get("source"),
+        "topology": topology.as_dict(),
+        "collectors": snapshot["collector_status"],
+        "metrics": metrics,
+        "dependencies": dependencies,
+        "smart_attempts": smart.get("attempts", []),
+        "warnings": list(dict.fromkeys(
+            ([snapshot["resolution"].get("warning")] if snapshot["resolution"].get("warning") else [])
+            + topology.errors
+            + ([smart.get("dependency_hint")] if smart.get("dependency_hint") else [])
+        )),
+    }
+
+
+def format_diagnostic_text(payload):
+    lines = [
+        f"Linux Bcache Monitor {payload['version']} - Diagnose",
+        f"Status: {payload['status']}",
+        f"Gerät: {payload.get('device') or 'nicht gefunden'} ({payload.get('device_source') or 'keine Quelle'})",
+        f"Cache-Set: {payload['topology'].get('cache_set_path') or 'nicht verfügbar'}",
+        f"Backing-Gerät: {payload['topology'].get('backing_device') or 'nicht verfügbar'}",
+        f"Cache-Geräte: {', '.join(payload['topology'].get('cache_block_devices') or []) or 'nicht verfügbar'}",
+        f"SMART-Geräte: {', '.join(payload['topology'].get('health_devices') or []) or 'nicht verfügbar'}",
+        "",
+        "Collector:",
+    ]
+    for name, ok in payload["collectors"].items():
+        lines.append(f"  {name}: {'OK' if ok else 'FEHLT/FEHLER'}")
+    lines.append("")
+    lines.append("Werte:")
+    for name, metric in payload["metrics"].items():
+        value = metric.get("value")
+        value_text = str(value) if value is not None else "n/v"
+        suffix = f" {metric.get('unit')}" if metric.get("unit") else ""
+        lines.append(f"  {name}: {value_text}{suffix} [{metric.get('status')}]")
+        if metric.get("reason"):
+            label = "Grund" if metric.get("status") != "ok" else "Hinweis"
+            lines.append(f"    {label}: {metric['reason']}")
+        if metric.get("source"):
+            lines.append(f"    Quelle: {metric['source']}")
+    if payload["warnings"]:
+        lines.append("")
+        lines.append("Hinweise:")
+        lines.extend(f"  - {warning}" for warning in payload["warnings"])
+    return "\n".join(lines)
 
 def format_pct(value):
     return "N/A" if value is None else f"{value:.1f}%"
@@ -1535,7 +2213,7 @@ def format_delta_pct_display(config_or_state, current, baseline):
 
 def list_bcache_devices():
     candidates = []
-    for path in sorted(glob.glob("/sys/block/*/bcache")):
+    for path in sorted(glob.glob(sysfs_path("block", "*", "bcache"))):
         if os.path.isdir(path):
             device = os.path.basename(os.path.dirname(path))
             if device:
@@ -1623,12 +2301,14 @@ def _sanitize_config(raw):
     return cfg
 
 
-def load_config():
+def load_config(create_if_missing=True):
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as src:
             return _sanitize_config(json.load(src)), ""
     except FileNotFoundError:
         cfg = default_config()
+        if not create_if_missing:
+            return cfg, "Config not found; using defaults without creating a file."
         ok, msg = save_config(cfg)
         return cfg, ("Config not found; defaults created." if ok else f"Config missing ({msg})")
     except PermissionError:
@@ -1668,12 +2348,14 @@ def _run_command(command, timeout=2.0):
     try:
         cp = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
         if cp.returncode != 0:
-            return {"ok": False, "status": f"ERR:{cp.returncode}", "stdout": cp.stdout, "stderr": cp.stderr}
-        return {"ok": True, "status": "OK", "stdout": cp.stdout, "stderr": cp.stderr}
+            return {"ok": False, "status": f"ERR:{cp.returncode}", "returncode": cp.returncode, "stdout": cp.stdout, "stderr": cp.stderr}
+        return {"ok": True, "status": "OK", "returncode": 0, "stdout": cp.stdout, "stderr": cp.stderr}
     except subprocess.TimeoutExpired:
-        return {"ok": False, "status": "TIMEOUT", "stdout": "", "stderr": ""}
+        return {"ok": False, "status": "TIMEOUT", "returncode": None, "stdout": "", "stderr": ""}
     except FileNotFoundError:
-        return {"ok": False, "status": "NOT INSTALLED", "stdout": "", "stderr": ""}
+        return {"ok": False, "status": "NOT INSTALLED", "returncode": None, "stdout": "", "stderr": ""}
+    except (PermissionError, OSError) as exc:
+        return {"ok": False, "status": f"OS ERROR:{exc}", "returncode": None, "stdout": "", "stderr": str(exc)}
 
 
 def list_running_containers():
@@ -1766,6 +2448,27 @@ def list_container_stats_for_state(state):
     return list_container_stats(state.selected_containers)
 
 
+def update_docker_io_samples(state, container_rows, now_ts):
+    current_io_totals = {}
+    for name, _cpu, _mem, _mem_usage_raw, block_io_raw in container_rows:
+        read_bytes, write_bytes = parse_docker_block_io_pair(block_io_raw)
+        if read_bytes is None and write_bytes is None:
+            continue
+        read_rate, write_rate, totals_sample = calculate_docker_io_rates(
+            state.docker_io_prev.get(name), read_bytes, write_bytes, now_ts
+        )
+        current_io_totals[name] = totals_sample
+        rate_history = state.docker_io_rate_history.setdefault(name, deque(maxlen=HISTORY))
+        if read_rate is not None or write_rate is not None:
+            rate_history.append((now_ts, read_rate, write_rate))
+        state.docker_io_rates[name] = average_recent_io_rates(rate_history, now_ts)
+    state.docker_io_prev = current_io_totals
+    active_names = {name for name, _, _, _, _ in container_rows}
+    for stale_name in set(state.docker_io_rate_history) - active_names:
+        state.docker_io_rate_history.pop(stale_name, None)
+        state.docker_io_rates.pop(stale_name, None)
+
+
 def missing_value_reasons(config_or_state, details=None, smart_health=None, state=None, sysfs_ok=True):
     details = details or {}
     reasons = []
@@ -1796,10 +2499,19 @@ def missing_value_reasons(config_or_state, details=None, smart_health=None, stat
         add(tr(config_or_state, "device_rate_waiting"))
 
     smart = smart_health or {}
-    if smart and all(smart.get(key) is None for key in ("life_remaining_percent", "temperature_c", "tbw_bytes")):
-        hint = smart.get("dependency_hint")
-        suffix = f": {localize_message(config_or_state, hint)}" if hint else ""
-        add(tr(config_or_state, "ssd_health_missing") + suffix)
+    if smart:
+        field_labels = {
+            "life_remaining_percent": "ssd_life_missing",
+            "temperature_c": "ssd_temp_missing",
+            "tbw_bytes": "ssd_tbw_missing",
+        }
+        field_reasons = smart.get("field_reasons", {})
+        for key, label in field_labels.items():
+            if smart.get(key) is not None:
+                continue
+            hint = field_reasons.get(key) or smart.get("dependency_hint")
+            suffix = f": {localize_message(config_or_state, hint)}" if hint else ""
+            add(tr(config_or_state, label) + suffix)
 
     if state is not None:
         docker_state = state.docker_state
@@ -1821,10 +2533,6 @@ def _discover_stats_total_path(bcache_path=None):
         direct = os.path.join(bcache_path, "stats_total")
         if os.path.isdir(direct):
             return direct
-
-    for root, dirs, _ in os.walk("/sys/fs/bcache"):
-        if "stats_total" in dirs:
-            return os.path.join(root, "stats_total")
     return ""
 
 
@@ -1835,17 +2543,24 @@ def stats(bcache_path=None):
     elif STATS_TOTAL_PATH is None:
         STATS_TOTAL_PATH = _discover_stats_total_path()
 
-    if not STATS_TOTAL_PATH:
+    counter_root = STATS_TOTAL_PATH
+    if not counter_root and bcache_path:
+        counter_root = bcache_path
+    if not counter_root:
         return None, None
 
-    h = read(f"{STATS_TOTAL_PATH}/cache_hits")
-    m = read(f"{STATS_TOTAL_PATH}/cache_misses")
+    h = read(os.path.join(counter_root, "cache_hits"))
+    m = read(os.path.join(counter_root, "cache_misses"))
 
     if h is None or m is None:
         STATS_TOTAL_PATH = None
         return None, None
 
-    return int(h), int(m)
+    try:
+        return int(h), int(m)
+    except ValueError:
+        STATS_TOTAL_PATH = None
+        return None, None
 
 def _parse_percent(raw):
     if raw is None:
@@ -1890,9 +2605,23 @@ class AppState:
     graph_scale: float = 1.0
     eff_history: deque = field(default_factory=lambda: deque(maxlen=HISTORY))
     backing_write_history: deque = field(default_factory=lambda: deque(maxlen=HISTORY))
+    sysfs_last: float = 0.0
+    sysfs_ok: bool = False
+    details_cache: dict = field(default_factory=dict)
+    current_hits: object = None
+    current_misses: object = None
+    current_hps: int = 0
+    current_mps: int = 0
+    current_eff: object = None
+    smart_future: object = None
+    docker_future: object = None
+    executor: object = None
+    history_last: float = 0.0
 
 
 def refresh_device_selection(state):
+    previous_device = state.device_name
+    previous_path = state.device_path
     resolution = resolve_bcache_device(state.config.get("bcache_device", ""))
     state.device_name = resolution["device"]
     state.device_path = resolution["path"]
@@ -1901,6 +2630,36 @@ def refresh_device_selection(state):
     state.device_warning = resolution["warning"]
     global BCACHE
     BCACHE = state.device_path
+    changed = previous_device != state.device_name or previous_path != state.device_path
+    if changed:
+        global STATS_TOTAL_PATH
+        STATS_TOTAL_PATH = None
+        state.ph = 0
+        state.pm = 0
+        state.pt = time.time()
+        state.sysfs_last = 0.0
+        state.sysfs_ok = False
+        state.details_cache = {}
+        state.history_last = 0.0
+        state.current_hits = None
+        state.current_misses = None
+        state.current_hps = 0
+        state.current_mps = 0
+        state.current_eff = None
+        state.hits.clear()
+        state.miss.clear()
+        state.miss_trend.clear()
+        state.eff_history.clear()
+        state.backing_io_prev = None
+        state.backing_rate_history.clear()
+        state.backing_write_history.clear()
+        state.backing_write_rate_bytes = None
+        state.smart_cache = {}
+        state.smart_last = 0.0
+        if state.smart_future is not None:
+            state.smart_future.cancel()
+        state.smart_future = None
+    return changed
 
 
 def handle_keypress(key, state):
@@ -2070,6 +2829,7 @@ def trend_arrow(current, baseline):
 # ---------- MAIN ----------
 
 def draw_settings(stdscr, state):
+    original_config = dict(state.config)
     if docker_enabled(state):
         running, ps_state = list_running_containers()
     else:
@@ -2202,7 +2962,9 @@ def draw_settings(stdscr, state):
 
         stdscr.refresh()
         ch = stdscr.getch()
-        if ch in [27, ord("q"), ord("Q")]: return
+        if ch in [27, ord("q"), ord("Q")]:
+            state.config = original_config
+            return
         if ch == 9:
             order = ["containers", "device", "docker", "language"]
             mode = order[(order.index(mode) + 1) % len(order)]
@@ -2228,6 +2990,10 @@ def draw_settings(stdscr, state):
             state.config["docker_enabled"] = docker_choice
             ok, msg = save_config(state.config)
             state.config_notice = tr(state, "config_saved") if ok else f"{tr(state, 'config_save_failed')}: {msg}"
+            if state.docker_future is not None:
+                state.docker_future.cancel()
+                state.docker_future = None
+            state.docker_last = 0.0
             refresh_device_selection(state)
             return
 
@@ -2260,7 +3026,7 @@ def info_lines(state):
             "Zusätzliche Informationen und Grenzen:",
             "HDD-/Backing-Größe: Wird aus /sys/block/<Gerät>/size berechnet. Belegter/freier Dateisystemplatz wird über /proc/self/mountinfo und /proc/mounts ermittelt, inklusive aufgelöster /dev/disk/by-*-Pfade.",
             "SSD-/Cache-Größe: Wird berechnet, wenn sysfs Daten bereitstellt, über bcache cache*/bucket_size * nbuckets. Der freie Writeback-Anteil nutzt cache_available_percent.",
-            "Cache->HDD-Schreibgeschwindigkeit: WB-Ziel ist die von bcache gemeldete bzw. gedrosselte Hintergrund-Writeback-Rate. HDD-Schreiben wird zusätzlich aus /sys/block/<Gerät>/stat berechnet und als Durchschnitt über das jüngste Zeitfenster angezeigt.",
+            "Cache->HDD-Schreibgeschwindigkeit: WB-Ziel ist die von bcache gemeldete bzw. gedrosselte Hintergrund-Writeback-Rate. HDD-Schreiben wird zusätzlich aus /sys/class/block/<Backing-Gerät>/stat berechnet und als Durchschnitt über das jüngste Zeitfenster angezeigt.",
             "cache_mode: writethrough/writeback/writearound/none steuert, wie bcache Lese- und Schreibzugriffe behandelt. Besonders writeback kann Dirty Data puffern.",
             "writeback_percent/running: Zielprozentsatz für Dirty Data und Status des Hintergrund-Writebacks. Wichtig, damit Dirty Data nicht dauerhaft liegen bleibt.",
             "",
@@ -2290,7 +3056,7 @@ def info_lines(state):
         "Additional info and limits:",
         "HDD/backing size: Calculated from /sys/block/<device>/size. Used/free filesystem space is discovered via /proc/self/mountinfo and /proc/mounts, including resolved /dev/disk/by-* paths.",
         "SSD/cache size: Calculated when sysfs exposes data, via bcache cache*/bucket_size * nbuckets. Available writeback share uses cache_available_percent.",
-        "Cache->HDD write speed: WB target is bcache's reported/throttled background writeback rate. HDD write is additionally calculated from /sys/block/<device>/stat and displayed as a recent-window average.",
+        "Cache->HDD write speed: WB target is bcache's reported/throttled background writeback rate. HDD write is additionally calculated from /sys/class/block/<backing-device>/stat and displayed as a recent-window average.",
         "cache_mode: writethrough/writeback/writearound/none controls how bcache handles reads/writes. In particular, writeback can buffer dirty data.",
         "writeback_percent/running: Dirty data target percentage and whether background writeback is active. Important so dirty data does not remain indefinitely.",
         "",
@@ -2331,7 +3097,10 @@ def draw_info(stdscr, state):
             scroll -= visible_h
 
 def draw_main(stdscr):
-    curses.curs_set(0)
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
     stdscr.nodelay(True)
 
     config, config_notice = load_config()
@@ -2342,6 +3111,7 @@ def draw_main(stdscr):
         update_notice = f"{tr(config, 'updated')}: {updated_from} -> {updated_to}"
 
     state = AppState(config=config, config_notice=config_notice, update_notice=update_notice, selected_containers=list(config.get("containers", [])), pt=time.time())
+    state.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="bcache-monitor")
     refresh_device_selection(state)
     ph,pm=stats(state.device_path)
     if ph is None or pm is None:
@@ -2381,36 +3151,90 @@ def draw_main(stdscr):
             time.sleep(1)
             continue
 
-        h0,m0=stats(state.device_path)
-        sysfs_ok = not (h0 is None or m0 is None)
-        if not sysfs_ok:
-            h0, m0 = state.ph, state.pm
         now=time.time()
-        dt=max(now-state.pt, MIN_RATE_SAMPLE_SECONDS)
+        if state.sysfs_last == 0.0 or now - state.sysfs_last >= 1.0:
+            sampled_h, sampled_m = stats(state.device_path)
+            state.sysfs_ok = sampled_h is not None and sampled_m is not None
+            if state.sysfs_ok:
+                dt=max(now-state.pt, MIN_RATE_SAMPLE_SECONDS)
+                counters_reset = sampled_h < state.ph or sampled_m < state.pm
+                if state.sysfs_last == 0.0 or counters_reset:
+                    sampled_hps, sampled_mps = 0, 0
+                else:
+                    sampled_hps = max(0, int((sampled_h-state.ph)/dt))
+                    sampled_mps = max(0, int((sampled_m-state.pm)/dt))
+                state.ph,state.pm,state.pt=sampled_h,sampled_m,now
+                state.current_hits, state.current_misses = sampled_h, sampled_m
+                state.current_hps, state.current_mps = sampled_hps, sampled_mps
+                state.current_eff = sampled_h/(sampled_h+sampled_m)*100 if (sampled_h+sampled_m) else 0.0
+                state.hits.append(sampled_hps)
+                state.miss.append(sampled_mps)
+                state.miss_trend.append(sampled_mps)
+                state.eff_history.append(state.current_eff)
 
-        hps=int((h0-state.ph)/dt); mps=int((m0-state.pm)/dt)
-        state.ph,state.pm,state.pt=h0,m0,now
-        state.hits.append(hps); state.miss.append(mps); state.miss_trend.append(mps)
+            sampled_details = read_bcache_details(state.device_name, state.device_path)
+            sampled_details["_core_available"] = state.sysfs_ok
+            backing_read_rate, backing_write_rate = calculate_device_rates(
+                state.backing_io_prev, sampled_details.get("device_stat"), now
+            )
+            if sampled_details.get("device_stat"):
+                state.backing_io_prev = (sampled_details["device_stat"], now)
+            if backing_write_rate is not None:
+                state.backing_rate_history.append((now, backing_read_rate, backing_write_rate))
+                _avg_backing_read_rate, avg_backing_write_rate = average_recent_io_rates(state.backing_rate_history, now)
+                state.backing_write_rate_bytes = avg_backing_write_rate
+                state.backing_write_history.append(avg_backing_write_rate)
+            sampled_details["backing_write_rate_bytes"] = state.backing_write_rate_bytes
+            state.details_cache = sampled_details
+            state.sysfs_last = now
 
-        eff=h0/(h0+m0)*100 if (h0+m0) else 0
+        details = state.details_cache or empty_bcache_details()
+        sysfs_ok = state.sysfs_ok
+        h0, m0 = state.current_hits, state.current_misses
+        hps, mps = state.current_hps, state.current_mps
+        eff = state.current_eff
         eff_baseline = (sum(state.eff_history) / len(state.eff_history)) if state.eff_history else None
-        state.eff_history.append(eff)
-        details = read_bcache_details(state.device_name, state.device_path)
-        if now - state.smart_last >= SMART_REFRESH_SECONDS or not state.smart_cache:
-            state.smart_cache = read_ssd_health(details.get("cache_devices"))
+
+        if state.smart_future is not None and state.smart_future.done():
+            try:
+                state.smart_cache = state.smart_future.result()
+            except Exception as exc:
+                state.smart_cache = base_ssd_health(
+                    details.get("cache_devices", []),
+                    dependency_hint=f"SSD health collection failed: {exc}",
+                )
             state.smart_last = now
-        smart_health = state.smart_cache
+            state.smart_future = None
+        if state.smart_future is None and (now - state.smart_last >= SMART_REFRESH_SECONDS or not state.smart_cache):
+            state.smart_future = state.executor.submit(read_ssd_health, tuple(details.get("cache_devices", [])))
+        smart_health = state.smart_cache or base_ssd_health(
+            details.get("cache_devices", []),
+            dependency_hint="SSD health collection is in progress.",
+        )
+
+        if state.docker_future is not None and state.docker_future.done():
+            try:
+                state.docker_cache, state.docker_state = state.docker_future.result()
+                update_docker_io_samples(state, state.docker_cache, now)
+            except Exception as exc:
+                state.docker_cache, state.docker_state = [], f"OS ERROR:{exc}"
+            state.docker_last = now
+            state.docker_future = None
+        if not docker_enabled(state):
+            state.docker_cache, state.docker_state = [], tr(state, "docker_disabled_state")
+        elif state.docker_future is None and now - state.docker_last >= DOCKER_REFRESH_SECONDS:
+            state.docker_future = state.executor.submit(list_container_stats, list(state.selected_containers))
+
+        if sysfs_ok and (state.history_last == 0.0 or now - state.history_last >= HISTORY_SAMPLE_SECONDS):
+            try:
+                append_history_sample(HISTORY_CSV_PATH, state.device_name, eff, details, smart_health, now)
+            except OSError:
+                pass
+            state.history_last = now
+
         report = health_report(eff, details, smart_health, hps, mps)
         recs = recommendations(eff, details, smart_health)
         flush_seconds = estimate_flush_seconds(details.get("dirty_bytes"), details.get("writeback_rate_bytes") or state.backing_write_rate_bytes)
-        backing_read_rate, backing_write_rate = calculate_device_rates(state.backing_io_prev, details.get("device_stat"), now)
-        if details.get("device_stat"):
-            state.backing_io_prev = (details["device_stat"], now)
-        if backing_write_rate is not None:
-            state.backing_rate_history.append((now, backing_read_rate, backing_write_rate))
-            _avg_backing_read_rate, avg_backing_write_rate = average_recent_io_rates(state.backing_rate_history, now)
-            state.backing_write_rate_bytes = avg_backing_write_rate
-            state.backing_write_history.append(avg_backing_write_rate)
         dirty_bytes = details["dirty_bytes"]
         dirty_display=format_bytes_display(state, dirty_bytes)
 
@@ -2419,9 +3243,16 @@ def draw_main(stdscr):
 
         # -------- KPI BLOCK --------
         ratio = (mps / hps) if hps > 0 else (float("inf") if mps > 0 else 0.0)
-        ratio_text = "∞" if ratio == float("inf") else f"{ratio:.2f}"
-        safe_addstr(stdscr,2,1,f"{tr(state, 'kpi')}   | {tr(state, 'score')} {report['score']:3d}/100 {localize_status(state, report['status'])}   EFF {eff:.1f}% ({efficiency_label_for_display(state, eff)})   {tr(state, 'dirty')} {dirty_display}", 2 if report["score"] >= 80 else (3 if report["score"] >= 50 else 1))
-        source_text = f"{tr(state, 'kpi')}   | {tr(state, 'live_hit')} {hps}   {tr(state, 'live_miss')} {mps}   {tr(state, 'source')} {localize_source(state, state.device_source)}"
+        ratio_text = unavailable_value(state) if not sysfs_ok else ("∞" if ratio == float("inf") else f"{ratio:.2f}")
+        score = report.get("score")
+        score_text = f"{score:3d}/100" if score is not None else unavailable_value(state)
+        score_color = 3 if score is None else (2 if score >= 80 else (3 if score >= 50 else 1))
+        eff_text = f"{eff:.1f}%" if eff is not None else unavailable_value(state)
+        eff_label = f" ({efficiency_label_for_display(state, eff)})" if eff is not None else ""
+        safe_addstr(stdscr,2,1,f"{tr(state, 'kpi')}   | {tr(state, 'score')} {score_text} {localize_status(state, report['status'])}   EFF {eff_text}{eff_label}   {tr(state, 'dirty')} {dirty_display}", score_color)
+        hps_text = str(hps) if sysfs_ok else unavailable_value(state)
+        mps_text = str(mps) if sysfs_ok else unavailable_value(state)
+        source_text = f"{tr(state, 'kpi')}   | {tr(state, 'live_hit')} {hps_text}   {tr(state, 'live_miss')} {mps_text}   {tr(state, 'source')} {localize_source(state, state.device_source)}"
         if maxx >= 96:
             source_text += f" ({tr(state, 'source_hint')})"
         safe_addstr(stdscr,3,1,source_text)
@@ -2472,11 +3303,21 @@ def draw_main(stdscr):
         max_m = max(state.miss) if state.miss else 0
         miss_share = (mps / (hps + mps) * 100.0) if (hps + mps) > 0 else 0.0
         # Legend for values: current / average / peak
-        h_part = f"{tr(state, 'hit_short')} {hps:>4}/{avg_h:>4.0f}/{max_h:>4}"
-        m_part = f"{tr(state, 'miss_short')} {mps:>4}/{avg_m:>4.0f}/{max_m:>4}"
+        current_h_text = f"{hps:>4}" if sysfs_ok else f"{unavailable_value(state):>4}"
+        current_m_text = f"{mps:>4}" if sysfs_ok else f"{unavailable_value(state):>4}"
+        h_part = f"{tr(state, 'hit_short')} {current_h_text}/{avg_h:>4.0f}/{max_h:>4}"
+        m_part = f"{tr(state, 'miss_short')} {current_m_text}/{avg_m:>4.0f}/{max_m:>4}"
         hit_share = (hps / (hps + mps) * 100.0) if (hps + mps) > 0 else 0.0
-        mix_part = f"MIX {tr(state, 'miss_short')}:{miss_share:>5.1f}% {tr(state, 'hit_short')}:{hit_share:>5.1f}%" if (hps + mps) > 0 else tr(state, "mix_idle")
-        delta_part = f"Δ {tr(state, 'miss_short')}:{format_delta_pct_display(state, mps, avg_m)} {tr(state, 'hit_short')}:{format_delta_pct_display(state, hps, avg_h)}"
+        mix_part = (
+            unavailable_value(state)
+            if not sysfs_ok
+            else (f"MIX {tr(state, 'miss_short')}:{miss_share:>5.1f}% {tr(state, 'hit_short')}:{hit_share:>5.1f}%" if (hps + mps) > 0 else tr(state, "mix_idle"))
+        )
+        delta_part = (
+            f"Δ {unavailable_value(state)}"
+            if not sysfs_ok
+            else f"Δ {tr(state, 'miss_short')}:{format_delta_pct_display(state, mps, avg_m)} {tr(state, 'hit_short')}:{format_delta_pct_display(state, hps, avg_h)}"
+        )
         safe_addstr(stdscr, info_y, graph_x, h_part, 2)
         x_off = graph_x + len(h_part)
         safe_addstr(stdscr, info_y, x_off, " | ", 6)
@@ -2492,14 +3333,17 @@ def draw_main(stdscr):
             info_y += 1
 
         # -------- STATUS --------
-        status,color,reason=status_from_metrics(eff,hps,mps,state.miss_trend)
-        safe_addstr(stdscr, info_y, 1, f"{tr(state, 'health')} | {tr(state, 'score')} {report['score']}/100 {localize_status(state, report['status'])} | {tr(state, 'primary_alert')}: {localize_status(state, status)} ({localize_reason(state, reason)})", color)
+        if eff is None:
+            status, color, reason = "DATA INCOMPLETE", 3, "bcache counters unavailable"
+        else:
+            status,color,reason=status_from_metrics(eff,hps,mps,state.miss_trend)
+        safe_addstr(stdscr, info_y, 1, f"{tr(state, 'health')} | {tr(state, 'score')} {score_text} {localize_status(state, report['status'])} | {tr(state, 'primary_alert')}: {localize_status(state, status)} ({localize_reason(state, reason)})", color)
         info_y += 1
-        eff_arrow = trend_arrow(eff, eff_baseline) if eff_baseline is not None else "→"
-        ratio_arrow = trend_arrow(mps, avg_m)
+        eff_arrow = trend_arrow(eff, eff_baseline) if eff is not None and eff_baseline is not None else "→"
+        ratio_arrow = trend_arrow(mps, avg_m) if sysfs_ok else ""
         if not tiny_mode:
             miss_hit_label = "Fehltreffer/Treffer" if is_german(state) else "MISS/HIT"
-            health_text = f"{tr(state, 'health')} | EFF {eff:.1f}%{eff_arrow} {tr(state, 'critical_short')}<{EFF_CRITICAL_THRESHOLD:.0f} | {miss_hit_label} {ratio_text}{ratio_arrow} {tr(state, 'critical_short')}≥{MISS_HIT_RATIO_CRITICAL:.2f}"
+            health_text = f"{tr(state, 'health')} | EFF {eff_text}{eff_arrow} {tr(state, 'critical_short')}<{EFF_CRITICAL_THRESHOLD:.0f} | {miss_hit_label} {ratio_text}{ratio_arrow} {tr(state, 'critical_short')}≥{MISS_HIT_RATIO_CRITICAL:.2f}"
             safe_addstr(stdscr, info_y, 1, health_text, color)
             info_y += 1
         if len(state.hits) >= 10 and len(state.miss) >= 10:
@@ -2509,7 +3353,12 @@ def draw_main(stdscr):
             short_h = avg_h
             short_m = avg_m
         if not compact_mode:
-            safe_addstr(stdscr, info_y, 1, f"{tr(state, 'avg_10s')} -> {tr(state, 'hit_short')}:{short_h:.0f}/s  {tr(state, 'miss_short')}:{short_m:.0f}/s  Δ{tr(state, 'miss_short')}:{format_delta_pct_display(state, short_m, avg_m)} {tr(state, 'vs_window')}", 4)
+            short_text = (
+                f"{tr(state, 'hit_short')}:{short_h:.0f}/s  {tr(state, 'miss_short')}:{short_m:.0f}/s  Δ{tr(state, 'miss_short')}:{format_delta_pct_display(state, short_m, avg_m)} {tr(state, 'vs_window')}"
+                if sysfs_ok
+                else unavailable_value(state)
+            )
+            safe_addstr(stdscr, info_y, 1, f"{tr(state, 'avg_10s')} -> {short_text}", 4)
             info_y += 1
 
         if compact_mode:
@@ -2531,10 +3380,13 @@ def draw_main(stdscr):
         stats_right_x = 32 if maxx >= 100 else max(1, maxx // 2)
         safe_addstr(stdscr,y,1,tr(state, "cache_numbers"),4)
         y += 1
-        safe_addstr(stdscr,y,1,f"{tr(state, 'total_hits')}:   {h0:,}")
-        safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'total_misses')}: {m0:,}")
+        hits_text = f"{h0:,}" if h0 is not None else unavailable_value(state)
+        misses_text = f"{m0:,}" if m0 is not None else unavailable_value(state)
+        safe_addstr(stdscr,y,1,f"{tr(state, 'total_hits')}:   {hits_text}")
+        safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'total_misses')}: {misses_text}")
         y += 1
-        safe_addstr(stdscr,y,1,f"{tr(state, 'efficiency')}:   {eff:6.2f}%")
+        efficiency_detail = f"{eff:6.2f}%" if eff is not None else unavailable_value(state)
+        safe_addstr(stdscr,y,1,f"{tr(state, 'efficiency')}:   {efficiency_detail}")
         safe_addstr(stdscr,y,stats_right_x,f"{('Fehlt./Treff.' if is_german(state) else 'Miss/Hit')}:     {ratio_text}")
         y += 1
         safe_addstr(stdscr,y,1,f"{tr(state, 'peak_hit')}:   {max_h:>6}")
@@ -2543,7 +3395,13 @@ def draw_main(stdscr):
         safe_addstr(stdscr,y,1,f"{tr(state, 'mode')}:         {format_cache_mode_display(state, details['cache_mode'])}")
         safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'wb_target')}:    {format_io_rate_display(state, details['writeback_rate_bytes'])}")
         y += 1
-        safe_addstr(stdscr,y,1,f"{tr(state, 'flush_eta')}:    {format_duration_display(state, flush_seconds)}")
+        flush_source = (
+            tr(state, "flush_source_wb")
+            if details.get("writeback_rate_bytes")
+            else (tr(state, "flush_source_backing") if state.backing_write_rate_bytes else "")
+        )
+        flush_suffix = f" ({flush_source})" if flush_seconds is not None and flush_source else ""
+        safe_addstr(stdscr,y,1,f"{tr(state, 'flush_eta')}:    {format_duration_display(state, flush_seconds)}{flush_suffix}")
         safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'ssd_life')}:     {format_pct_display(state, smart_health.get('life_remaining_percent'))}")
         y += 1
         safe_addstr(stdscr,y,1,f"{tr(state, 'ssd_temp')}:     {(str(smart_health.get('temperature_c')) + ' °C') if smart_health.get('temperature_c') is not None else unavailable_value(state)}")
@@ -2564,7 +3422,7 @@ def draw_main(stdscr):
         safe_addstr(stdscr,y,stats_right_x,hdd_used)
         y += 1
         if y < maxy - 5:
-            safe_addstr(stdscr,y,1,(tr(state, "recommend") + ": " + localize_message(state, recs[0]))[:maxx-2],3 if report["score"] < 80 else 2)
+            safe_addstr(stdscr,y,1,(tr(state, "recommend") + ": " + localize_message(state, recs[0]))[:maxx-2],3 if score is None or score < 80 else 2)
             y += 1
         diag = automatic_diagnosis(state.eff_history, eff, hps, mps, details, smart_health, state.docker_io_rates)
         anomaly = detect_anomalies(list(state.backing_write_history)[:-1], state.backing_write_rate_bytes)
@@ -2582,15 +3440,6 @@ def draw_main(stdscr):
         y += 1
         safe_addstr(stdscr,y,1,tr(state, "containers_title"),4)
         y+=1
-
-        docker_refreshed = now - state.docker_last >= DOCKER_REFRESH_SECONDS
-        if docker_refreshed:
-            state.docker_cache, state.docker_state = list_container_stats_for_state(state)
-            try:
-                append_history_sample(HISTORY_CSV_PATH, state.device_name, eff, details, smart_health, now)
-            except OSError:
-                pass
-            state.docker_last = now
 
         selection_label = f"{len(state.selected_containers)} {tr(state, 'selected')}" if state.selected_containers else tr(state, "all_empty_selection")
         safe_addstr(stdscr, y, 1, f"{tr(state, 'containers_title')}: {selection_label}", 4)
@@ -2644,28 +3493,20 @@ def draw_main(stdscr):
         y += 1
         if (maxy - 2) - y < 1:
             safe_addstr(stdscr, y, table_start_x, tr(state, "not_enough_space"), 3)
-        now_ts = time.time()
-        current_io_totals = {}
-        for name,cpu,mem,mem_usage_raw,block_io_raw in state.docker_cache:
+        ranked_container_rows = sorted(
+            state.docker_cache,
+            key=lambda row: sum(value or 0 for value in state.docker_io_rates.get(row[0], (None, None))),
+            reverse=True,
+        )
+        for name,cpu,mem,mem_usage_raw,_block_io_raw in ranked_container_rows:
             if y+1 >= maxy:
                 break
             cpu_room = max(0, cpu_col_w - 10)
             mem_room = max(0, mem_col_w - 11)
             mem_bytes = parse_docker_mem_usage_bytes(mem_usage_raw)
             mem_text = format_bytes_display(state, mem_bytes)
-            read_bytes, write_bytes = parse_docker_block_io_pair(block_io_raw)
 
             read_rate, write_rate = state.docker_io_rates.get(name, (None, None))
-            if docker_refreshed and (read_bytes is not None or write_bytes is not None):
-                read_rate, write_rate, totals_sample = calculate_docker_io_rates(
-                    state.docker_io_prev.get(name), read_bytes, write_bytes, now_ts
-                )
-                current_io_totals[name] = totals_sample
-                rate_history = state.docker_io_rate_history.setdefault(name, deque(maxlen=HISTORY))
-                if read_rate is not None or write_rate is not None:
-                    rate_history.append((now_ts, read_rate, write_rate))
-                read_rate, write_rate = average_recent_io_rates(rate_history, now_ts)
-                state.docker_io_rates[name] = (read_rate, write_rate)
             if io_col_w >= 26:
                 io_text = f"{tr(state, 'read_short')} {format_io_rate_display(state, read_rate)} {tr(state, 'write_short')} {format_io_rate_display(state, write_rate)}"
             else:
@@ -2685,13 +3526,6 @@ def draw_main(stdscr):
             safe_addstr(stdscr,y,mem_x + 11 + len(bar_mem),bar_mem_empty,6)
             safe_addstr(stdscr,y,io_x,f"{tr(state, 'disk_short')} {io_text}",6)
             y+=1
-        if docker_refreshed:
-            state.docker_io_prev = current_io_totals
-            active_names = {name for name, _, _, _, _ in state.docker_cache}
-            for stale_name in set(state.docker_io_rate_history) - active_names:
-                state.docker_io_rate_history.pop(stale_name, None)
-                state.docker_io_rates.pop(stale_name, None)
-
         if state.update_notice: safe_addstr(stdscr,maxy-2,1,state.update_notice,3)
         if state.config_notice: safe_addstr(stdscr,maxy-2,1,localize_message(state, state.config_notice),3)
         elif state.device_warning: safe_addstr(stdscr,maxy-2,1,localize_message(state, state.device_warning),3)
@@ -2709,25 +3543,38 @@ def draw_main(stdscr):
 
         time.sleep(FRAME_SECONDS)
 
+    if state.executor is not None:
+        state.executor.shutdown(wait=False)
+
+
+def print_diagnostics_and_exit_if_requested(argv):
+    json_mode = "--diagnose-json" in argv[1:]
+    if not json_mode and "--diagnose" not in argv[1:]:
+        return None
+    config, _notice = load_config(create_if_missing=False)
+    snapshot = collect_monitor_snapshot(config)
+    payload = diagnostic_payload(snapshot)
+    if json_mode:
+        print(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True))
+    else:
+        print(format_diagnostic_text(payload))
+    return snapshot["exit_code"]
+
 
 def print_prometheus_and_exit_if_requested(argv):
     if not any(arg in ("--prometheus", "--metrics") for arg in argv[1:]):
-        return False
-    config, _notice = load_config()
-    resolution = resolve_bcache_device(config.get("bcache_device", ""))
-    global BCACHE
-    BCACHE = resolution.get("path") or ""
-    h0, m0 = stats()
-    h0 = h0 or 0
-    m0 = m0 or 0
-    eff = h0 / (h0 + m0) * 100 if (h0 + m0) else 0.0
-    details = read_bcache_details(resolution.get("device"), resolution.get("path")) if resolution.get("path") else {
-        "cache_mode": None, "dirty_bytes": 0, "cache_available_percent": None, "writeback_rate_bytes": None,
-    }
-    smart_health = read_ssd_health(details.get("cache_devices", []))
-    report = health_report(eff, details, smart_health)
-    print(prometheus_metrics(resolution.get("device"), eff, details, smart_health, report), end="")
-    return True
+        return None
+    config, _notice = load_config(create_if_missing=False)
+    snapshot = collect_monitor_snapshot(config)
+    print(prometheus_metrics(
+        snapshot["resolution"].get("device"),
+        snapshot["efficiency"],
+        snapshot["details"],
+        snapshot["smart_health"],
+        snapshot["report"],
+        snapshot["collector_status"],
+    ), end="")
+    return 0 if snapshot["collector_status"]["sysfs"] else 1
 
 def print_version_and_exit_if_requested(argv):
     if any(arg in ("--version", "-V") for arg in argv[1:]):
@@ -2738,9 +3585,13 @@ def print_version_and_exit_if_requested(argv):
 
 def main():
     if print_version_and_exit_if_requested(sys.argv):
-        return
-    if print_prometheus_and_exit_if_requested(sys.argv):
-        return
+        return 0
+    diagnostic_exit = print_diagnostics_and_exit_if_requested(sys.argv)
+    if diagnostic_exit is not None:
+        return diagnostic_exit
+    prometheus_exit = print_prometheus_and_exit_if_requested(sys.argv)
+    if prometheus_exit is not None:
+        return prometheus_exit
 
     updated_from = os.environ.get("BCACHE_MONITOR_UPDATED_FROM")
     updated_to = os.environ.get("BCACHE_MONITOR_UPDATED_TO")
@@ -2750,6 +3601,7 @@ def main():
 
     self_update_if_needed()
     curses.wrapper(init)
+    return 0
 
 def init(stdscr):
     curses.start_color()
@@ -2761,4 +3613,4 @@ def init(stdscr):
     draw_main(stdscr)
 
 if __name__=="__main__":
-    main()
+    raise SystemExit(main())

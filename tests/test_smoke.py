@@ -1,8 +1,15 @@
 from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
+import sys
+import pytest
 
 module_path = Path(__file__).resolve().parents[1] / "bcache-monitor"
-bcache_monitor = SourceFileLoader("bcache_monitor", str(module_path)).load_module()
+loader = SourceFileLoader("bcache_monitor", str(module_path))
+spec = spec_from_loader(loader.name, loader)
+bcache_monitor = module_from_spec(spec)
+sys.modules[loader.name] = bcache_monitor
+loader.exec_module(bcache_monitor)
 
 
 def test_version_string_validation_accepts_numeric_versions():
@@ -13,8 +20,19 @@ def test_parse_sysfs_size_bytes_handles_mib_suffix():
     assert bcache_monitor.parse_sysfs_size_bytes("12MiB") == 12 * 1024 * 1024
 
 
+def test_parse_sysfs_size_bytes_handles_kernel_rate_and_large_units():
+    assert bcache_monitor.parse_sysfs_size_bytes("4.0M/s") == 4 * 1024 ** 2
+    assert bcache_monitor.parse_sysfs_size_bytes("1.5T") == int(1.5 * 1024 ** 4)
+    assert bcache_monitor.parse_sysfs_size_bytes("2PiB") == 2 * 1024 ** 5
+
+
 def test_parse_docker_block_io_pair_returns_read_and_write_totals():
     assert bcache_monitor.parse_docker_block_io_pair("1.5MiB / 2KiB") == (1572864, 2048)
+
+
+def test_parse_docker_sizes_distinguishes_si_and_iec_units():
+    assert bcache_monitor.parse_docker_size_bytes("4.11MB") == 4_110_000
+    assert bcache_monitor.parse_docker_size_bytes("4.11MiB") == int(4.11 * 1024 ** 2)
 
 
 def test_format_delta_pct_suppresses_zero_baseline_percentages():
@@ -32,15 +50,15 @@ def test_format_cache_mode_falls_back_to_raw_value():
 def test_version_metadata_is_in_sync():
     repo_root = Path(__file__).resolve().parents[1]
     version = (repo_root / "VERSION").read_text().strip()
-    readme = (repo_root / "README.md").read_text()
+    readme = (repo_root / "README.md").read_text(encoding="utf-8")
 
-    assert bcache_monitor.__version__ == version == "0.8.3"
+    assert bcache_monitor.__version__ == version == "0.9.0"
     assert f"**Version:** {version}" in readme
 
 
 def test_print_version_and_exit_for_cli_flag(capsys):
     assert bcache_monitor.print_version_and_exit_if_requested(["bcache-monitor", "--version"]) is True
-    assert capsys.readouterr().out.strip() == "0.8.3"
+    assert capsys.readouterr().out.strip() == "0.9.0"
 
 
 def test_info_lines_include_bugreport_and_ai_notice():
@@ -118,6 +136,13 @@ def test_calculate_device_rates_uses_written_sectors():
     assert write_rate == 2048
 
 
+def test_calculate_device_rates_rejects_counter_reset():
+    prev = ({"read_sectors": 100, "write_sectors": 200}, 1.0)
+    current = {"read_sectors": 10, "write_sectors": 20}
+
+    assert bcache_monitor.calculate_device_rates(prev, current, 2.0) == (None, None)
+
+
 def test_average_recent_io_rates_uses_recent_window():
     history = bcache_monitor.deque([
         (1.0, 100.0, 200.0),
@@ -185,6 +210,76 @@ Temperature:                        43 Celsius
     assert health["temperature_c"] == 43
     assert health["tbw_bytes"] == 512000000
 
+
+def test_parse_smart_health_text_parses_ata_table_without_inventing_wear():
+    raw = """
+177 Wear_Leveling_Count     0x0013   091   091   000    Pre-fail  Always       -       123
+194 Temperature_Celsius     0x0022   068   060   000    Old_age   Always       -       32
+241 Total_LBAs_Written      0x0032   099   099   000    Old_age   Always       -       123456
+"""
+    health = bcache_monitor.parse_smart_health_text(raw)
+
+    assert health["life_remaining_percent"] is None
+    assert health["temperature_c"] == 32
+    assert health["tbw_bytes"] == 123456 * 512
+
+
+def test_parse_smart_health_json_parses_reliable_ata_fields():
+    raw = """
+{
+  "temperature": {"current": 41},
+  "logical_block_size": 4096,
+  "ata_smart_attributes": {
+    "table": [
+      {"name": "Media_Wearout_Indicator", "value": 87, "raw": {"value": 123}},
+      {"name": "Total_LBAs_Written", "value": 99, "raw": {"value": 1000}}
+    ]
+  }
+}
+"""
+    health = bcache_monitor.parse_smart_health_json(raw)
+
+    assert health["life_remaining_percent"] == 87
+    assert health["temperature_c"] == 41
+    assert health["tbw_bytes"] == 1000 * 4096
+
+
+def test_smartctl_warning_exit_status_still_allows_metrics():
+    result = {"returncode": 8, "stdout": "SMART warning", "status": "ERR:8"}
+
+    assert bcache_monitor._smartctl_result_usable(result) is True
+
+
+def test_read_ssd_health_aggregates_worst_temperature_and_life(monkeypatch):
+    values = {
+        "sda": {
+            **bcache_monitor.empty_ssd_health_values(),
+            "device": "/dev/sda",
+            "source": "smartctl-json",
+            "life_remaining_percent": 80,
+            "temperature_c": 40,
+            "tbw_bytes": 100,
+            "attempts": [],
+        },
+        "sdb": {
+            **bcache_monitor.empty_ssd_health_values(),
+            "device": "/dev/sdb",
+            "source": "smartctl-json",
+            "life_remaining_percent": 65,
+            "temperature_c": 52,
+            "tbw_bytes": 200,
+            "attempts": [],
+        },
+    }
+    monkeypatch.setattr(bcache_monitor, "_read_one_ssd_health", lambda name: values[name])
+
+    health = bcache_monitor.read_ssd_health(["sda", "sdb"])
+
+    assert health["life_remaining_percent"] == 65
+    assert health["temperature_c"] == 52
+    assert health["tbw_bytes"] == 300
+
+
 def test_smart_dependency_hint_recommends_nvme_cli_for_nvme_cache():
     assert "nvme-cli" in bcache_monitor.smart_dependency_hint(["nvme0n1"], ["nvme"], "NOT INSTALLED")
 
@@ -224,11 +319,12 @@ def test_info_lines_are_localized_to_german():
 def test_dependency_summary_includes_direct_optional_command_checks(monkeypatch):
     monkeypatch.setattr(bcache_monitor.shutil, "which", lambda command: None)
 
-    warnings = bcache_monitor.dependency_summary_lines({}, "OK")
+    smart = bcache_monitor.base_ssd_health(["nvme0n1"], dependency_hint=bcache_monitor.missing_dependency_hint("nvme"))
+    warnings = bcache_monitor.dependency_summary_lines(smart, "OK")
 
     assert any("Docker CLI" in warning for warning in warnings)
     assert any("nvme-cli" in warning for warning in warnings)
-    assert any("smartmontools" in warning for warning in warnings)
+    assert not any("smartmontools" in warning for warning in warnings)
 
 
 def test_dependency_summary_localizes_german_hints(monkeypatch):
@@ -270,13 +366,11 @@ def test_automatic_diagnosis_recommends_sequential_cutoff_for_low_efficiency():
     assert "sequential_cutoff" in diagnosis["recommendation"]
 
 
-def test_cache_size_advice_detects_oversized_cache():
-    details = {"cache_capacity": 120 * 1024 ** 3, "backing_size": 640 * 1024 ** 3}
+def test_health_report_suppresses_score_when_core_data_is_incomplete():
+    report = bcache_monitor.health_report(None, {"_core_available": False}, {})
 
-    advice = bcache_monitor.cache_size_advice(details)
-
-    assert advice["status"] == "oversized"
-    assert advice["recommended_bytes"] == 64 * 1024 ** 3
+    assert report["score"] is None
+    assert report["status"] == "DATA INCOMPLETE"
 
 
 def test_docker_top_io_calculates_largest_share():
@@ -288,6 +382,154 @@ def test_docker_top_io_calculates_largest_share():
     assert round(top["share_percent"]) == 91
 
 
+def _fake_bcache_sysfs(tmp_path, monkeypatch):
+    sysroot = tmp_path / "sys"
+    backing_partition = sysroot / "devices" / "pci0" / "block" / "sdb" / "sdb1"
+    cache_disk = sysroot / "devices" / "pci0" / "block" / "sda"
+    cache_partition = cache_disk / "sda1"
+    backing_bcache = backing_partition / "bcache"
+    cache_bcache = cache_partition / "bcache"
+    backing_bcache.mkdir(parents=True)
+    cache_bcache.mkdir(parents=True)
+    (cache_partition / "partition").write_text("1\n")
+    (backing_partition / "partition").write_text("1\n")
+
+    cache_set = sysroot / "fs" / "bcache" / "test-uuid"
+    cache_set.mkdir(parents=True)
+    try:
+        (backing_bcache / "cache").symlink_to(cache_set, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks are not available: {exc}")
+    (cache_set / "cache0").symlink_to(cache_bcache, target_is_directory=True)
+
+    block_root = sysroot / "block" / "bcache0"
+    block_root.mkdir(parents=True)
+    (block_root / "bcache").symlink_to(backing_bcache, target_is_directory=True)
+
+    class_block = sysroot / "class" / "block"
+    class_block.mkdir(parents=True)
+    (class_block / "sda").symlink_to(cache_disk, target_is_directory=True)
+    (class_block / "sda1").symlink_to(cache_partition, target_is_directory=True)
+    (class_block / "sdb1").symlink_to(backing_partition, target_is_directory=True)
+    bcache_class = class_block / "bcache0"
+    bcache_class.mkdir()
+    (bcache_class / "size").write_text("4096\n")
+    (backing_partition / "stat").write_text("1 0 8 0 2 0 16 0 0 0 0\n")
+
+    (backing_bcache / "backing_dev_name").write_text("sdb1\n")
+    (backing_bcache / "dirty_data").write_text("12.0M\n")
+    (backing_bcache / "cache_mode").write_text("writethrough [writeback] writearound none\n")
+    (backing_bcache / "writeback_percent").write_text("10\n")
+    (backing_bcache / "writeback_running").write_text("1\n")
+    (backing_bcache / "writeback_rate").write_text("4.0M\n")
+    stats_total = backing_bcache / "stats_total"
+    stats_total.mkdir()
+    (stats_total / "cache_hits").write_text("49644\n")
+    (stats_total / "cache_misses").write_text("375\n")
+    (cache_bcache / "bucket_size").write_text("512K\n")
+    (cache_bcache / "nbuckets").write_text("100\n")
+    (cache_set / "cache_available_percent").write_text("88\n")
+
+    monkeypatch.setattr(bcache_monitor, "SYSFS_ROOT", str(sysroot))
+    return block_root / "bcache"
+
+
+def test_topology_resolves_partition_cache_and_physical_health_device(tmp_path, monkeypatch):
+    bcache_path = _fake_bcache_sysfs(tmp_path, monkeypatch)
+
+    topology = bcache_monitor.discover_bcache_topology("bcache0", str(bcache_path))
+
+    assert topology.status == "ok"
+    assert topology.backing_device == "sdb1"
+    assert topology.cache_block_devices == ["sda1"]
+    assert topology.health_devices == ["sda"]
+
+
+def test_read_bcache_details_parses_writeback_bytes_and_backing_stat(tmp_path, monkeypatch):
+    bcache_path = _fake_bcache_sysfs(tmp_path, monkeypatch)
+
+    details = bcache_monitor.read_bcache_details("bcache0", str(bcache_path))
+
+    assert details["writeback_rate_bytes"] == 4 * 1024 ** 2
+    assert details["cache_capacity"] == 512 * 1024 * 100
+    assert details["cache_devices"] == ["sda"]
+    assert details["device_stat"] == {"read_sectors": 8, "write_sectors": 16}
+    assert details["_metrics"]["writeback_rate_bytes"].status == "ok"
+
+
+def test_prometheus_omits_unknown_values_and_exposes_collector_status():
+    details = bcache_monitor.empty_bcache_details()
+    report = {"score": None}
+    smart = bcache_monitor.base_ssd_health([])
+
+    output = bcache_monitor.prometheus_metrics(
+        "bcache0",
+        None,
+        details,
+        smart,
+        report,
+        {"sysfs": False, "topology": False, "smart": False},
+    )
+
+    assert "bcache_hit_ratio" not in output
+    assert "bcache_dirty_bytes" not in output
+    assert "bcache_cache_available_percent" not in output
+    assert 'collector="sysfs"} 0' in output
+
+
+def test_diagnostic_payload_has_stable_schema_and_no_smart_raw_output(tmp_path, monkeypatch):
+    _fake_bcache_sysfs(tmp_path, monkeypatch)
+    smart = {
+        **bcache_monitor.base_ssd_health(["sda"]),
+        "device": "/dev/sda",
+        "source": "smartctl-json",
+        "life_remaining_percent": 90,
+        "temperature_c": 40,
+        "tbw_bytes": 1234,
+    }
+    monkeypatch.setattr(bcache_monitor, "read_ssd_health", lambda _devices: smart)
+
+    snapshot = bcache_monitor.collect_monitor_snapshot({
+        "bcache_device": "bcache0",
+        "containers": [],
+        "language": "de",
+        "docker_enabled": False,
+    })
+    payload = bcache_monitor.diagnostic_payload(snapshot)
+
+    assert payload["schema_version"] == 1
+    assert payload["status"] == "degraded"
+    assert payload["topology"]["health_devices"] == ["sda"]
+    assert "serial" not in str(payload).lower()
+
+
+def test_diagnostic_payload_handles_missing_bcache_device():
+    snapshot = {
+        "details": bcache_monitor.empty_bcache_details(),
+        "hits": None,
+        "misses": None,
+        "efficiency": None,
+        "resolution": {"device": None, "path": None, "source": "none", "warning": "missing"},
+        "smart_health": bcache_monitor.base_ssd_health([]),
+        "collector_status": {"sysfs": False, "topology": False, "smart": False},
+        "status": "failed",
+    }
+
+    payload = bcache_monitor.diagnostic_payload(snapshot)
+
+    assert payload["status"] == "failed"
+    assert payload["metrics"]["cache_hits"]["value"] is None
+
+
+def test_update_validation_rejects_syntax_error():
+    script = b'#!/usr/bin/env python3\n__version__ = "0.9.1"\nif True print("broken")\n' + b"# pad\n" * 300
+
+    content, error = bcache_monitor.validate_update_script(script)
+
+    assert content is None
+    assert "syntax" in error
+
+
 def test_self_update_uses_script_version_when_version_file_is_stale(monkeypatch, tmp_path):
     installed = tmp_path / "bcache-monitor"
     installed.write_text("#!/usr/bin/env python3\n__version__ = \"0.8.3\"\n" + "# old\n" * 300)
@@ -297,6 +539,7 @@ def test_self_update_uses_script_version_when_version_file_is_stale(monkeypatch,
 
     monkeypatch.delenv(bcache_monitor.UPDATE_FAIL_COUNT_ENV, raising=False)
     monkeypatch.delenv("BCACHE_MONITOR_UPDATED_TO", raising=False)
+    monkeypatch.setattr(bcache_monitor, "__version__", "0.8.3")
     monkeypatch.setattr(bcache_monitor, "__file__", str(installed))
     monkeypatch.setattr(bcache_monitor, "read_remote_text", lambda _url: "0.8.3")
     monkeypatch.setattr(bcache_monitor, "read_remote_bytes", lambda _url: remote_script.encode("utf-8"))

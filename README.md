@@ -14,13 +14,11 @@ A lightweight and fast **Linux bcache monitoring tool** for real-time performanc
 - 🧠 Simple CLI interface (no Python package dependencies)
 - 🌍 German/English UI mode in settings
 - 🔍 Detect IO bottlenecks
-- 🩺 Automatic error diagnosis with likely causes and recommended action
-- 📊 Before/after performance comparison helpers for tuning changes
+- 🩺 Read-only diagnostics with exact source and failure information
+- 🧭 Robust topology detection for partitions, NVMe, SATA/SAS, USB, md, and device-mapper
 - 🚨 Write-load anomaly detection
 - 🐳 Docker I/O ranking by container
-- 🍓 Raspberry Pi status helpers for UASP, I/O wait, and CPU temperature
-- 📐 Cache-size advisor and maintenance/upgrade guard
-- 🔧 Auto-tuning suggestions for cache mode, sequential cutoff, and writeback percent
+- 🛡️ Maintenance guard for dirty data and critical SSD health
 - 🧮 Health-Score (0–100) with automatic recommendations
 - 🧾 Historical CSV samples for trend analysis
 - 🌡️ SSD SMART/NVMe health: wear, remaining life, TBW, and temperature when `smartctl` or `nvme` is available
@@ -60,6 +58,8 @@ This `curl` downloads the file to the **current path** and makes it executable i
 curl -fsSL https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monitor/main/bcache-monitor -o ./bcache-monitor && chmod +x ./bcache-monitor
 ```
 
+Runtime requirement: Linux with Python 3.8 or newer. The core dashboard has no third-party Python dependencies.
+
 ---
 
 
@@ -73,15 +73,35 @@ Print one Prometheus-compatible metrics snapshot without starting the curses das
 
 Example metrics include `bcache_hit_ratio`, `bcache_dirty_bytes`, `bcache_cache_available_percent`, `bcache_state`, `bcache_health_score`, `bcache_ssd_life_remaining_percent`, `bcache_ssd_temperature_celsius`, and `bcache_ssd_total_bytes_written`.
 
+Unavailable optional values are omitted rather than exported as synthetic `0` or `-1`. Collector state is exposed through `bcache_monitor_collector_success`.
+
+## 🔎 Read-only diagnostics
+
+Print a human-readable report with the selected bcache device, resolved backing/cache devices, metric sources, and precise failure reasons:
+
+```bash
+./bcache-monitor --diagnose
+```
+
+For automation and bug reports, use the schema-versioned JSON output:
+
+```bash
+./bcache-monitor --diagnose-json
+```
+
+The diagnostic output excludes drive serial numbers and complete SMART command output. Exit codes are `0` for complete data, `1` when optional data is unavailable, and `2` when the bcache device or core counters cannot be read.
+
 ## 🗂️ Historical statistics
 
-The dashboard appends CSV samples to `~/.local/share/bcache-monitor/history.csv` on periodic refresh. Override the target path with:
+The dashboard appends one CSV sample per minute to `~/.local/share/bcache-monitor/history.csv`, independently of Docker and terminal size. Override the target path with:
 
 ```bash
 BCACHE_MONITOR_HISTORY_CSV=/var/lib/bcache-monitor/history.csv ./bcache-monitor
 ```
 
 This history can reveal falling hit rates, growing dirty-data backlogs, or workload changes over time.
+
+Change the interval with `BCACHE_MONITOR_HISTORY_INTERVAL_SECONDS`.
 
 ## 🩺 SSD health requirements
 
@@ -91,6 +111,8 @@ SSD/NVMe health is optional and depends on local tools and permissions:
 - SATA/SAS SSD: `smartctl -A /dev/<cache-device>`
 
 If these tools are missing or the process lacks permission, the dashboard keeps running, displays `N/A` for the affected SSD fields, and prints an on-screen `HINWEIS` with the missing command or permission problem.
+
+Some SATA/SAS SSDs do not expose a standardized remaining-life or TBW attribute. In that case temperature or other available fields are still shown, while diagnostics explicitly report that the missing field cannot be interpreted reliably.
 
 ## 🧰 Optional dependency hints
 
@@ -106,13 +128,13 @@ When one of these commands is missing, fails, or times out, the dashboard keeps 
 
 Open settings with `S`, switch to the language section with `Tab`, and press `Space` to toggle between German and English. The selection is saved in `~/.config/bcache-monitor/config.json`.
 
-## 🧠 Diagnostics and tuning helpers
+## 🧠 Diagnostics and recommendations
 
-Version 0.8.3 completes the German dashboard localization and adds visible explanations for unavailable values instead of leaving bare `N/A` entries. Version 0.8.2 smoothed byte-per-second throughput displays with a recent-window average so HDD and Docker I/O values no longer jump to zero on short idle samples.
+Version 0.9.0 fixes human-readable `writeback_rate` values, physical backing-device throughput, cache-device discovery, and JSON/text SMART parsing. Recommendations are suppressed when their required source data is unavailable; the monitor never writes bcache tuning values.
 
 ## ℹ️ Info, credits, and legal notes
 
-- **Version:** 0.8.3
+- **Version:** 0.9.0
 - **Credits:** by Fabian Schmeltzer
 - **AI note:** This program was written with AI assistance and may contain errors. Please verify critical output and use this tool at your own risk.
 - **Bug reports:** Please submit bugs and improvement suggestions via GitHub Issues: <https://github.com/fabianschmeltzer/Linux-Bcache-Monitor/issues>
@@ -133,9 +155,9 @@ Version 0.8.3 completes the German dashboard localization and adds visible expla
 - **HDD/backing:** Size of the bcache block device and, if mounted, used/free filesystem space.
 - **Flush ETA:** Estimated dirty-data drain time from dirty bytes and writeback/HDD write rate.
 - **SSD life / SSD temp / SSD TBW:** Optional SMART/NVMe cache device health values.
-- **WB target:** Background writeback rate (`writeback_rate`) reported by bcache in bytes/s. This is bcache's throttle/target rate and not necessarily identical to physical HDD I/O.
+- **WB target:** Background writeback rate (`writeback_rate`) reported by bcache in bytes/s, including human-readable kernel values such as `4.0M`. This is bcache's throttle/target rate and not necessarily identical to physical HDD I/O.
 - **WB percent / WB running:** Target share for dirty data and status indicating whether bcache background writeback is running.
-- **HDD write:** Real backing-device write rate calculated from `/sys/block/<device>/stat` and displayed as a recent-window average. Helps show whether dirty data is actually draining to HDD without short idle samples forcing the display to zero.
+- **HDD write:** Real backing-device write rate calculated from `/sys/class/block/<backing-device>/stat` and displayed as a recent-window average. If used for Flush ETA, the UI marks it as an HDD estimate.
 - **Docker DISK:** Read and write rates from Docker `BlockIO` deltas displayed as a recent-window average.
 
 The throughput average window defaults to `10` seconds and can be changed with `BCACHE_MONITOR_RATE_AVERAGE_SECONDS`.
