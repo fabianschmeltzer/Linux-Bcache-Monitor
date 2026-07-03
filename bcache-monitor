@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from collections import deque
 
-__version__ = "0.9.0"
+__version__ = "0.9.1"
 
 # URLs can be overridden for your publish target, e.g. GitHub raw links.
 VERSION_URL = os.environ.get("BCACHE_MONITOR_VERSION_URL", "https://raw.githubusercontent.com/fabianschmeltzer/Linux-Bcache-Monitor/main/VERSION")
@@ -607,9 +607,13 @@ def safe_addstr(stdscr,y,x,text,color=0):
     maxy,maxx = stdscr.getmaxyx()
     if 0 <= y < maxy and 0 <= x < maxx:
         try:
+            color_attr = curses.color_pair(color)
+        except curses.error:
+            color_attr = 0
+        try:
             available = maxx - x
             if available > 0:
-                stdscr.addstr(y,x,text[:available],curses.color_pair(color))
+                stdscr.addstr(y,x,text[:available],color_attr)
         except curses.error:
             pass
 
@@ -2826,6 +2830,640 @@ def trend_arrow(current, baseline):
         return "↓"
     return "→"
 
+
+@dataclass(frozen=True)
+class DashboardLayout:
+    profile: str
+    show_graph: bool
+    split_summary: bool
+    graph_y: int = 0
+    graph_x: int = 0
+    graph_w: int = 0
+    graph_h: int = 0
+    side_x: int = 0
+    side_w: int = 0
+
+
+def dashboard_layout(height, width):
+    """Return a stable layout for the current terminal dimensions."""
+    height = max(1, int(height))
+    width = max(1, int(width))
+    show_graph = height >= 17 and width >= 38
+    if not show_graph:
+        return DashboardLayout("minimal", False, False)
+
+    graph_y = 5
+    graph_x = 8
+    if width >= 88:
+        side_x = max(54, min(width - 33, int(width * 0.56)))
+        graph_w = max(12, side_x - graph_x - 2)
+        graph_h_limit = 36 if height >= 50 else 18
+        graph_h = max(4, min(graph_h_limit, int(height * 0.58), height - 18))
+        return DashboardLayout(
+            "split",
+            True,
+            True,
+            graph_y,
+            graph_x,
+            graph_w,
+            graph_h,
+            side_x,
+            max(1, width - side_x - 1),
+        )
+
+    graph_w = max(12, width - graph_x - 1)
+    graph_h = max(3, min(9, height - 16))
+    return DashboardLayout(
+        "stacked",
+        True,
+        False,
+        graph_y,
+        graph_x,
+        graph_w,
+        graph_h,
+    )
+
+
+def clip_cell(value, width):
+    width = max(0, int(width))
+    if width == 0:
+        return ""
+    text = str(value)
+    if len(text) <= width:
+        return text
+    if width < 2:
+        return text[:width]
+    return text[:width - 1] + "…"
+
+
+def pack_metric_rows(items, width, separator=" | "):
+    """Pack ordered metric snippets into the available width."""
+    width = max(1, int(width))
+    rows = []
+    current = ""
+    for raw_item in items:
+        item = " ".join(str(raw_item or "").split())
+        if not item:
+            continue
+        item = clip_cell(item, width)
+        candidate = item if not current else current + separator + item
+        if current and len(candidate) > width:
+            rows.append(current)
+            current = item
+        else:
+            current = candidate
+    if current:
+        rows.append(current)
+    return rows
+
+
+def _cache_summary_items(
+    state,
+    details,
+    smart_health,
+    flush_seconds,
+    hits_total,
+    misses_total,
+):
+    fs_usage = details.get("fs_usage")
+    backing_total = fs_usage.get("total") if fs_usage else details.get("backing_size")
+    backing_free = fs_usage.get("free") if fs_usage else None
+    dirty_display = format_bytes_display(state, details.get("dirty_bytes"))
+    return [
+        f"{tr(state, 'mode')}: {format_cache_mode_display(state, details.get('cache_mode'))}",
+        f"{tr(state, 'dirty')}: {dirty_display}",
+        f"{tr(state, 'wb_target')}: {format_io_rate_display(state, details.get('writeback_rate_bytes'))}",
+        f"{tr(state, 'flush_eta')}: {format_duration_display(state, flush_seconds)}",
+        f"{tr(state, 'ssd_life')}: {format_pct_display(state, smart_health.get('life_remaining_percent'))}",
+        f"{tr(state, 'ssd_temp')}: "
+        + (
+            f"{smart_health.get('temperature_c')} °C"
+            if smart_health.get("temperature_c") is not None
+            else unavailable_value(state)
+        ),
+        f"{tr(state, 'avail_wb')}: {format_pct_display(state, details.get('cache_available_percent'))}",
+        f"{tr(state, 'hdd_write')}: {format_io_rate_display(state, state.backing_write_rate_bytes)}",
+        f"{tr(state, 'ssd_cache')}: {format_bytes_display(state, details.get('cache_capacity'))}",
+        f"{tr(state, 'hdd_backing')}: {format_bytes_display(state, backing_total)}",
+        f"{tr(state, 'free')}: {format_bytes_display(state, backing_free)}",
+        f"{tr(state, 'total_hits')}: "
+        + (f"{hits_total:,}" if hits_total is not None else unavailable_value(state)),
+        f"{tr(state, 'total_misses')}: "
+        + (f"{misses_total:,}" if misses_total is not None else unavailable_value(state)),
+        f"{tr(state, 'wb_percent')}: {value_or_unavailable(state, details.get('writeback_percent'))}",
+        f"{tr(state, 'wb_running')}: {value_or_unavailable(state, details.get('writeback_running'))}",
+        f"{tr(state, 'ssd_tbw')}: {format_bytes_display(state, smart_health.get('tbw_bytes'))}",
+    ]
+
+
+def _draw_metric_summary(
+    stdscr,
+    state,
+    items,
+    y,
+    x,
+    width,
+    max_rows,
+    one_per_row=False,
+):
+    if max_rows <= 0 or width <= 0:
+        return y
+    safe_addstr(stdscr, y, x, clip_cell(tr(state, "cache_numbers"), width), 4)
+    y += 1
+    max_rows -= 1
+    rows = (
+        [clip_cell(" ".join(str(item or "").split()), width) for item in items if item]
+        if one_per_row
+        else pack_metric_rows(items, width)
+    )
+    for line in rows[:max_rows]:
+        safe_addstr(stdscr, y, x, line)
+        y += 1
+    return y
+
+
+def _dashboard_notice(state):
+    if state.update_notice:
+        return state.update_notice
+    if state.config_notice:
+        return localize_message(state, state.config_notice)
+    if state.device_warning:
+        return localize_message(state, state.device_warning)
+    return ""
+
+
+def _dashboard_footer(state, width):
+    if width >= 64:
+        return tr(state, "footer")
+    if is_german(state):
+        return "Q Ende | S Setup | R Neu | I Info"
+    return "Q Quit | S Setup | R Reload | I Info"
+
+
+def _issue_summary(state, issues, width):
+    if not issues:
+        return ""
+    prefix = f"{tr(state, 'dependency')}: "
+    suffix = ""
+    if len(issues) > 1:
+        suffix = (
+            f" (+{len(issues) - 1} weitere; I=Info)"
+            if is_german(state)
+            else f" (+{len(issues) - 1} more; I=Info)"
+        )
+    room = max(1, width - len(prefix) - len(suffix))
+    return prefix + clip_cell(issues[0], room) + suffix
+
+
+def _draw_container_table(stdscr, state, y, bottom, width, sysfs_ok, issues):
+    if y >= bottom or width < 2:
+        return y
+
+    selection = (
+        f"{len(state.selected_containers)} {tr(state, 'selected')}"
+        if state.selected_containers
+        else tr(state, "all_empty_selection")
+    )
+    data_status = (
+        f"SYSFS {'OK' if sysfs_ok else tr(state, 'missing')} | "
+        f"DOCKER {localize_command_status(state, state.docker_state)}"
+    )
+    section = f"{tr(state, 'containers_title')}: {selection} | {data_status}"
+    safe_addstr(stdscr, y, 1, clip_cell(section, width - 2), 4)
+    y += 1
+
+    issue_line = _issue_summary(state, issues, width - 2)
+    if issue_line and bottom - y >= 3:
+        safe_addstr(stdscr, y, 1, issue_line, 3)
+        y += 1
+
+    if y >= bottom:
+        return y
+    if not state.docker_cache:
+        safe_addstr(stdscr, y, 1, clip_cell(tr(state, "no_containers"), width - 2), 3)
+        return y + 1
+
+    usable = max(1, width - 2)
+    names = [row[0] for row in state.docker_cache]
+    longest_name = max(len(name) for name in names)
+
+    if usable < 18:
+        name_w, cpu_w, mem_w, io_w = usable, 0, 0, 0
+    elif usable < 30:
+        cpu_w = 9
+        name_w = max(6, usable - cpu_w)
+        mem_w = io_w = 0
+    elif usable < 48:
+        cpu_w, mem_w, io_w = 9, 11, 0
+        name_w = max(8, usable - cpu_w - mem_w)
+    elif usable < 88:
+        name_w = min(max(14, longest_name + 2), max(14, int(usable * 0.31)))
+        cpu_w, mem_w = 10, 13
+        io_w = max(0, usable - name_w - cpu_w - mem_w)
+    else:
+        name_w = min(max(18, longest_name + 2), min(32, int(usable * 0.26)))
+        cpu_w = min(26, max(18, int(usable * 0.16)))
+        mem_w = min(34, max(22, int(usable * 0.20)))
+        io_w = max(0, usable - name_w - cpu_w - mem_w)
+
+    cpu_x = 1 + name_w
+    mem_x = cpu_x + cpu_w
+    io_x = mem_x + mem_w
+    safe_addstr(stdscr, y, 1, clip_cell(tr(state, "name"), name_w - 1), 4)
+    if cpu_w:
+        safe_addstr(stdscr, y, cpu_x, "CPU", 4)
+    if mem_w:
+        safe_addstr(stdscr, y, mem_x, tr(state, "ram"), 4)
+    if io_w:
+        safe_addstr(stdscr, y, io_x, tr(state, "disk"), 4)
+    y += 1
+
+    ranked_rows = sorted(
+        state.docker_cache,
+        key=lambda row: sum(value or 0 for value in state.docker_io_rates.get(row[0], (None, None))),
+        reverse=True,
+    )
+    for name, cpu, mem, mem_usage_raw, _block_io_raw in ranked_rows:
+        if y >= bottom:
+            break
+        disp_name = clip_cell(name, max(1, name_w - 1))
+        safe_addstr(stdscr, y, 1, f"{disp_name:<{max(1, name_w - 1)}}")
+
+        if cpu_w:
+            cpu_text = f"{cpu:5.1f}%"
+            safe_addstr(stdscr, y, cpu_x, cpu_text, 6)
+            cpu_bar_w = min(16, max(0, cpu_w - len(cpu_text) - 1))
+            if cpu_bar_w:
+                bar, empty = draw_meter(cpu, cpu_bar_w, 2, empty_char=" ")
+                safe_addstr(stdscr, y, cpu_x + len(cpu_text) + 1, bar, 2)
+                safe_addstr(stdscr, y, cpu_x + len(cpu_text) + 1 + len(bar), empty, 6)
+
+        if mem_w:
+            mem_text = format_bytes_display(state, parse_docker_mem_usage_bytes(mem_usage_raw))
+            safe_addstr(stdscr, y, mem_x, clip_cell(mem_text, mem_w - 1), 6)
+            mem_bar_w = min(16, max(0, mem_w - len(mem_text) - 2))
+            if mem_bar_w:
+                bar, empty = draw_meter(mem, mem_bar_w, 3, empty_char=" ")
+                bar_x = mem_x + len(mem_text) + 1
+                safe_addstr(stdscr, y, bar_x, bar, 3)
+                safe_addstr(stdscr, y, bar_x + len(bar), empty, 6)
+
+        if io_w:
+            read_rate, write_rate = state.docker_io_rates.get(name, (None, None))
+            if io_w >= 25:
+                io_text = (
+                    f"{tr(state, 'read_short')} {format_io_rate_display(state, read_rate)} "
+                    f"{tr(state, 'write_short')} {format_io_rate_display(state, write_rate)}"
+                )
+            else:
+                total_rate = (
+                    None
+                    if read_rate is None and write_rate is None
+                    else (read_rate or 0) + (write_rate or 0)
+                )
+                io_text = format_io_rate_display(state, total_rate)
+            safe_addstr(stdscr, y, io_x, clip_cell(io_text, io_w), 6)
+        y += 1
+    return y
+
+
+def _draw_dashboard_details(stdscr, state, y, bottom, width, detail_lines):
+    if bottom - y < 2 or not detail_lines:
+        return y
+    title = (
+        f"{tr(state, 'diagnosis_title')} / {tr(state, 'dependency')}"
+        if is_german(state)
+        else "DIAGNOSIS / NOTES"
+    )
+    safe_addstr(stdscr, y, 1, clip_cell(title, max(1, width - 2)), 4)
+    y += 1
+    for text, color in detail_lines:
+        if y >= bottom:
+            break
+        safe_addstr(stdscr, y, 1, clip_cell(text, max(1, width - 2)), color)
+        y += 1
+    return y
+
+
+def render_dashboard(stdscr, state, details, smart_health, report, recs, flush_seconds):
+    """Render the current snapshot without collecting any data."""
+    maxy, maxx = stdscr.getmaxyx()
+    layout = dashboard_layout(maxy, maxx)
+    notice = _dashboard_notice(state)
+    content_bottom = max(0, maxy - (2 if notice else 1))
+    sysfs_ok = state.sysfs_ok
+    hits_total, misses_total = state.current_hits, state.current_misses
+    hps, mps = state.current_hps, state.current_mps
+    eff = state.current_eff
+
+    ratio = (mps / hps) if hps > 0 else (float("inf") if mps > 0 else 0.0)
+    ratio_text = unavailable_value(state) if not sysfs_ok else ("∞" if ratio == float("inf") else f"{ratio:.2f}")
+    score = report.get("score")
+    score_text = f"{score:3d}/100" if score is not None else unavailable_value(state)
+    score_color = 3 if score is None else (2 if score >= 80 else (3 if score >= 50 else 1))
+    eff_text = f"{eff:.1f}%" if eff is not None else unavailable_value(state)
+    dirty_display = format_bytes_display(state, details.get("dirty_bytes"))
+    hps_text = str(hps) if sysfs_ok else unavailable_value(state)
+    mps_text = str(mps) if sysfs_ok else unavailable_value(state)
+
+    if maxx < 55:
+        header = f"{tr(state, 'app_title')} v{__version__} | {state.device_name or unavailable_value(state)}"
+    else:
+        header = (
+            f"{tr(state, 'header')} | {tr(state, 'app_title')} v{__version__} | "
+            f"{tr(state, 'device_label')} {state.device_name or unavailable_value(state)}"
+        )
+    safe_addstr(stdscr, 0, 1, header, 6)
+
+    eff_label = (
+        f" ({efficiency_label_for_display(state, eff)})"
+        if eff is not None and maxx >= 82
+        else ""
+    )
+    kpi_line = (
+        f"{localize_status(state, report['status'])} {score_text} | "
+        f"EFF {eff_text}{eff_label} | {tr(state, 'dirty')} {dirty_display}"
+    )
+    safe_addstr(stdscr, 1, 1, kpi_line, score_color)
+
+    rate_line = f"LIVE {tr(state, 'hit_short')} {hps_text}/s | {tr(state, 'miss_short')} {mps_text}/s | F/T {ratio_text}"
+    if maxx >= 100:
+        rate_line += f" | {tr(state, 'source')} {localize_source(state, state.device_source)}"
+    safe_addstr(stdscr, 2, 1, rate_line)
+    cache_line = (
+        f"{tr(state, 'mode')} {format_cache_mode_display(state, details.get('cache_mode'))} | "
+        f"{tr(state, 'wb_target')} {format_io_rate_display(state, details.get('writeback_rate_bytes'))} | "
+        f"{tr(state, 'hdd_write')} {format_io_rate_display(state, state.backing_write_rate_bytes)}"
+    )
+    safe_addstr(stdscr, 3, 1, cache_line, 4)
+
+    if eff is None:
+        status, status_color, reason = "DATA INCOMPLETE", 3, "bcache counters unavailable"
+    else:
+        status, status_color, reason = status_from_metrics(eff, hps, mps, state.miss_trend)
+    health_line = (
+        f"{tr(state, 'health')} | {tr(state, 'primary_alert')}: "
+        f"{localize_status(state, status)} ({localize_reason(state, reason)})"
+    )
+
+    avg_h = (sum(state.hits) / len(state.hits)) if state.hits else 0
+    avg_m = (sum(state.miss) / len(state.miss)) if state.miss else 0
+    max_h = max(state.hits) if state.hits else 0
+    max_m = max(state.miss) if state.miss else 0
+    summary_items = _cache_summary_items(
+        state,
+        details,
+        smart_health,
+        flush_seconds,
+        hits_total,
+        misses_total,
+    )
+
+    issues = dependency_summary_lines(
+        smart_health,
+        state.docker_state,
+        docker_enabled(state),
+        state,
+    )
+    if not docker_enabled(state):
+        issues.append(tr(state, "docker_disabled_hint"))
+    issues.extend(missing_value_reasons(state, details, smart_health, state, sysfs_ok))
+    issues = list(dict.fromkeys(issue for issue in issues if issue))
+    if eff is None:
+        diag = {
+            "problem": True,
+            "recommendation": "Core bcache values are incomplete.",
+        }
+    else:
+        diag = automatic_diagnosis(
+            state.eff_history,
+            eff,
+            hps,
+            mps,
+            details,
+            smart_health,
+            state.docker_io_rates,
+        )
+    guard = maintenance_guard(details, smart_health)
+    anomaly = detect_anomalies(
+        list(state.backing_write_history)[:-1],
+        state.backing_write_rate_bytes,
+    )
+
+    if layout.show_graph:
+        raw_maxv = max(
+            max(state.hits) if state.hits else 0,
+            max(state.miss) if state.miss else 0,
+            1,
+        )
+        target_maxv = FIXED_MAX_PS if FIXED_MAX_PS > 0 else raw_maxv
+        state.graph_scale = 0.35 * target_maxv + 0.65 * state.graph_scale
+        maxv = max(int(state.graph_scale), 1)
+
+        draw_y_markers(
+            stdscr,
+            layout.graph_y,
+            layout.graph_x - 1,
+            layout.graph_h,
+            maxv,
+        )
+        draw_x_axis(
+            stdscr,
+            layout.graph_y + layout.graph_h - 1,
+            layout.graph_x,
+            layout.graph_w,
+        )
+        draw_line_graph(
+            stdscr,
+            state.miss,
+            layout.graph_y,
+            layout.graph_x,
+            layout.graph_w,
+            layout.graph_h,
+            1,
+            maxv,
+        )
+        draw_line_graph(
+            stdscr,
+            state.hits,
+            layout.graph_y,
+            layout.graph_x,
+            layout.graph_w,
+            layout.graph_h,
+            2,
+            maxv,
+        )
+        if layout.graph_w >= 76:
+            graph_legend = (
+                f"{tr(state, 'graph')} | "
+                + ("rot=F/s grün=T/s" if is_german(state) else "red=M/s green=H/s")
+                + f" | {tr(state, 'graph_scale')} {maxv}/s | ◆ {tr(state, 'graph_latest')}"
+            )
+        else:
+            graph_legend = (
+                f"{tr(state, 'graph')} | "
+                + ("F rot T grün" if is_german(state) else "M red H green")
+                + f" | {maxv}/s"
+            )
+        safe_addstr(
+            stdscr,
+            layout.graph_y - 1,
+            layout.graph_x,
+            clip_cell(graph_legend, layout.graph_w),
+            6,
+        )
+
+        graph_stats = (
+            f"{tr(state, 'hit_short')} {hps_text}/{avg_h:.0f}/{max_h} | "
+            f"{tr(state, 'miss_short')} {mps_text}/{avg_m:.0f}/{max_m} | "
+            + (tr(state, "hm_format") if layout.graph_w >= 64 else tr(state, "mix_idle") if hps + mps == 0 else f"F/T {ratio_text}")
+        )
+        main_y = layout.graph_y + layout.graph_h
+        safe_addstr(stdscr, main_y, layout.graph_x, clip_cell(graph_stats, layout.graph_w), 6)
+        main_y += 1
+        safe_addstr(stdscr, main_y, 1, health_line, status_color)
+        main_y += 1
+
+        if layout.split_summary:
+            divider_x = layout.side_x - 2
+            for row in range(layout.graph_y - 1, layout.graph_y + layout.graph_h):
+                safe_addstr(stdscr, row, divider_x, "│", 4)
+
+            side_items = list(summary_items)
+            if recs:
+                side_items.append(f"{tr(state, 'recommend')}: {localize_message(state, recs[0])}")
+            if diag["problem"]:
+                side_items.append(
+                    f"{tr(state, 'diagnosis_title')}: {localize_message(state, diag['recommendation'])}"
+                )
+            side_items.append(
+                f"{tr(state, 'maintenance')}: {localize_message(state, guard['message'])}"
+            )
+            if issues and maxy >= 50:
+                side_items.extend(
+                    f"{tr(state, 'dependency')}: {issue}" for issue in issues
+                )
+            elif issues:
+                side_items.append(_issue_summary(state, issues, layout.side_w))
+            _draw_metric_summary(
+                stdscr,
+                state,
+                side_items,
+                layout.graph_y - 1,
+                layout.side_x,
+                layout.side_w,
+                layout.graph_h + 1,
+                one_per_row=maxy >= 50,
+            )
+            table_y = main_y + (1 if main_y < content_bottom else 0)
+        else:
+            remaining = max(0, content_bottom - main_y)
+            reserve_for_table = 4 if maxy >= 20 and remaining >= 7 else 0
+            summary_budget = min(
+                10,
+                max(0, remaining - reserve_for_table),
+            )
+            if summary_budget:
+                main_y = _draw_metric_summary(
+                    stdscr,
+                    state,
+                    summary_items,
+                    main_y,
+                    1,
+                    max(1, maxx - 2),
+                    summary_budget,
+                )
+            table_y = main_y
+    else:
+        main_y = 4
+        safe_addstr(stdscr, main_y, 1, health_line, status_color)
+        main_y += 1
+        remaining = max(0, content_bottom - main_y)
+        summary_budget = min(10, remaining)
+        main_y = _draw_metric_summary(
+            stdscr,
+            state,
+            summary_items,
+            main_y,
+            1,
+            max(1, maxx - 2),
+            summary_budget,
+        )
+        table_y = main_y
+
+    detail_y = table_y
+    if table_y < content_bottom:
+        detail_y = _draw_container_table(
+            stdscr,
+            state,
+            table_y,
+            content_bottom,
+            maxx,
+            sysfs_ok,
+            issues,
+        )
+    detail_lines = []
+    if recs:
+        detail_lines.append(
+            (
+                f"{tr(state, 'recommend')}: {localize_message(state, recs[0])}",
+                3 if score is None or score < 80 else 2,
+            )
+        )
+    diagnosis_text = (
+        localize_message(state, diag["recommendation"])
+        if diag["problem"]
+        else tr(state, "no_problem")
+    )
+    detail_lines.append(
+        (
+            f"{tr(state, 'diagnosis_title')}: {diagnosis_text}",
+            3 if diag["problem"] else 2,
+        )
+    )
+    if anomaly.get("anomaly"):
+        detail_lines.append(
+            (
+                f"{tr(state, 'anomaly')}: {localize_message(state, anomaly['message'])}",
+                1,
+            )
+        )
+    detail_lines.append(
+        (
+            f"{tr(state, 'maintenance')}: {localize_message(state, guard['message'])}",
+            2 if guard["safe"] else 3,
+        )
+    )
+    for warning in report.get("warnings", []):
+        detail_lines.append(
+            (f"{tr(state, 'health')}: {localize_message(state, warning)}", score_color)
+        )
+    for issue in issues:
+        detail_lines.append((f"{tr(state, 'dependency')}: {issue}", 3))
+    if layout.show_graph:
+        detail_lines.append(
+            (
+                f"{tr(state, 'window')} {len(state.hits)}s | "
+                f"Ø {tr(state, 'hit_short')} {avg_h:.1f}/s | "
+                f"Ø {tr(state, 'miss_short')} {avg_m:.1f}/s | "
+                f"Max {tr(state, 'hit_short')} {max_h}/s, {tr(state, 'miss_short')} {max_m}/s",
+                6,
+            )
+        )
+    _draw_dashboard_details(
+        stdscr,
+        state,
+        detail_y,
+        content_bottom,
+        maxx,
+        detail_lines,
+    )
+
+    if notice and maxy >= 2:
+        safe_addstr(stdscr, maxy - 2, 1, notice, 3)
+    if maxy >= 1:
+        safe_addstr(stdscr, maxy - 1, 1, _dashboard_footer(state, maxx), 4)
+
 # ---------- MAIN ----------
 
 def draw_settings(stdscr, state):
@@ -3134,10 +3772,6 @@ def draw_main(stdscr):
             time.sleep(1)
             continue
 
-        tiny_mode = maxy < 18 or maxx < 64
-        compact_mode = maxy < 22 or maxx < 80
-        narrow_mode = maxx < 120
-
         # DATA
         if not state.device_path:
             safe_addstr(stdscr,0,1,f"{tr(state, 'app_title')} v{__version__}",4)
@@ -3190,10 +3824,8 @@ def draw_main(stdscr):
 
         details = state.details_cache or empty_bcache_details()
         sysfs_ok = state.sysfs_ok
-        h0, m0 = state.current_hits, state.current_misses
         hps, mps = state.current_hps, state.current_mps
         eff = state.current_eff
-        eff_baseline = (sum(state.eff_history) / len(state.eff_history)) if state.eff_history else None
 
         if state.smart_future is not None and state.smart_future.done():
             try:
@@ -3235,301 +3867,16 @@ def draw_main(stdscr):
         report = health_report(eff, details, smart_health, hps, mps)
         recs = recommendations(eff, details, smart_health)
         flush_seconds = estimate_flush_seconds(details.get("dirty_bytes"), details.get("writeback_rate_bytes") or state.backing_write_rate_bytes)
-        dirty_bytes = details["dirty_bytes"]
-        dirty_display=format_bytes_display(state, dirty_bytes)
 
-        # -------- HEADER --------
-        safe_addstr(stdscr,0,1,f"{tr(state, 'header')} | {tr(state, 'app_title')} v{__version__} | {tr(state, 'device_label')} {state.device_name or unavailable_value(state)}",6)
-
-        # -------- KPI BLOCK --------
-        ratio = (mps / hps) if hps > 0 else (float("inf") if mps > 0 else 0.0)
-        ratio_text = unavailable_value(state) if not sysfs_ok else ("∞" if ratio == float("inf") else f"{ratio:.2f}")
-        score = report.get("score")
-        score_text = f"{score:3d}/100" if score is not None else unavailable_value(state)
-        score_color = 3 if score is None else (2 if score >= 80 else (3 if score >= 50 else 1))
-        eff_text = f"{eff:.1f}%" if eff is not None else unavailable_value(state)
-        eff_label = f" ({efficiency_label_for_display(state, eff)})" if eff is not None else ""
-        safe_addstr(stdscr,2,1,f"{tr(state, 'kpi')}   | {tr(state, 'score')} {score_text} {localize_status(state, report['status'])}   EFF {eff_text}{eff_label}   {tr(state, 'dirty')} {dirty_display}", score_color)
-        hps_text = str(hps) if sysfs_ok else unavailable_value(state)
-        mps_text = str(mps) if sysfs_ok else unavailable_value(state)
-        source_text = f"{tr(state, 'kpi')}   | {tr(state, 'live_hit')} {hps_text}   {tr(state, 'live_miss')} {mps_text}   {tr(state, 'source')} {localize_source(state, state.device_source)}"
-        if maxx >= 96:
-            source_text += f" ({tr(state, 'source_hint')})"
-        safe_addstr(stdscr,3,1,source_text)
-
-        # -------- GRAPH --------
-        footer_reserved = 2
-        graph_min_h = 4 if compact_mode else 6
-        graph_max_fraction = 0.34 if narrow_mode else 0.32
-        graph_max_h = 12 if compact_mode else 16
-        # Make the container section visible earlier: fixed reserve for Health + container header/table.
-        reserved_after_graph = 8 if compact_mode else (13 if narrow_mode else 12)
-        graph_h = max(
-            graph_min_h,
-            min(
-                maxy - reserved_after_graph - footer_reserved,
-                int(maxy * graph_max_fraction),
-                graph_max_h,
-            ),
+        render_dashboard(
+            stdscr,
+            state,
+            details,
+            smart_health,
+            report,
+            recs,
+            flush_seconds,
         )
-        graph_y = 5
-        graph_x = 8
-        available_graph_w = maxx - graph_x - 1
-        graph_w = max(1, available_graph_w)
-        if available_graph_w >= 20:
-            graph_w = max(20, graph_w)
-        raw_maxv = max(max(state.hits) if state.hits else 0, max(state.miss) if state.miss else 0, 1)
-        target_maxv = FIXED_MAX_PS if FIXED_MAX_PS > 0 else raw_maxv
-        state.graph_scale = 0.35 * target_maxv + 0.65 * state.graph_scale
-        maxv = max(int(state.graph_scale), 1)
-
-        draw_y_markers(stdscr, graph_y, graph_x - 1, graph_h, maxv)
-        draw_x_axis(stdscr, graph_y + graph_h - 1, graph_x, graph_w)
-        draw_line_graph(stdscr, state.miss, graph_y, graph_x, graph_w, graph_h, 1, maxv)
-        draw_line_graph(stdscr, state.hits, graph_y, graph_x, graph_w, graph_h, 2, maxv)
-        if compact_mode:
-            graph_legend = tr(state, "graph_compact_legend")
-        else:
-            graph_legend = f"{tr(state, 'graph')} | rot=Fehltreffer/s | grün=Treffer/s | {tr(state, 'graph_scale')} {maxv}/s | ◆ {tr(state, 'graph_latest')} | • {tr(state, 'graph_history')}" if is_german(state) else f"{tr(state, 'graph')} | red=MISS/s | green=HIT/s | {tr(state, 'graph_scale')} {maxv}/s | ◆ {tr(state, 'graph_latest')} | • {tr(state, 'graph_history')}"
-        safe_addstr(stdscr, graph_y - 1, graph_x, graph_legend, 6)
-        info_y = graph_y + graph_h + 1
-        point_help = tr(state, "graph_points_help")
-        safe_addstr(stdscr, info_y, graph_x, point_help, 6)
-        info_y += 1
-
-        avg_h = (sum(state.hits) / len(state.hits)) if state.hits else 0
-        avg_m = (sum(state.miss) / len(state.miss)) if state.miss else 0
-        max_h = max(state.hits) if state.hits else 0
-        max_m = max(state.miss) if state.miss else 0
-        miss_share = (mps / (hps + mps) * 100.0) if (hps + mps) > 0 else 0.0
-        # Legend for values: current / average / peak
-        current_h_text = f"{hps:>4}" if sysfs_ok else f"{unavailable_value(state):>4}"
-        current_m_text = f"{mps:>4}" if sysfs_ok else f"{unavailable_value(state):>4}"
-        h_part = f"{tr(state, 'hit_short')} {current_h_text}/{avg_h:>4.0f}/{max_h:>4}"
-        m_part = f"{tr(state, 'miss_short')} {current_m_text}/{avg_m:>4.0f}/{max_m:>4}"
-        hit_share = (hps / (hps + mps) * 100.0) if (hps + mps) > 0 else 0.0
-        mix_part = (
-            unavailable_value(state)
-            if not sysfs_ok
-            else (f"MIX {tr(state, 'miss_short')}:{miss_share:>5.1f}% {tr(state, 'hit_short')}:{hit_share:>5.1f}%" if (hps + mps) > 0 else tr(state, "mix_idle"))
-        )
-        delta_part = (
-            f"Δ {unavailable_value(state)}"
-            if not sysfs_ok
-            else f"Δ {tr(state, 'miss_short')}:{format_delta_pct_display(state, mps, avg_m)} {tr(state, 'hit_short')}:{format_delta_pct_display(state, hps, avg_h)}"
-        )
-        safe_addstr(stdscr, info_y, graph_x, h_part, 2)
-        x_off = graph_x + len(h_part)
-        safe_addstr(stdscr, info_y, x_off, " | ", 6)
-        x_off += 3
-        safe_addstr(stdscr, info_y, x_off, m_part, 1)
-        x_off += len(m_part)
-        safe_addstr(stdscr, info_y, x_off, f" | {mix_part} | {delta_part}", 6)
-        info_y += 1
-        safe_addstr(stdscr, info_y, graph_x, tr(state, "hm_format"), 6)
-        info_y += 1
-        if not tiny_mode:
-            safe_addstr(stdscr, info_y, graph_x, f"{tr(state, 'window')} {min(len(state.hits), graph_w)}s ({tr(state, 'buffer')} {HISTORY}s)", 6)
-            info_y += 1
-
-        # -------- STATUS --------
-        if eff is None:
-            status, color, reason = "DATA INCOMPLETE", 3, "bcache counters unavailable"
-        else:
-            status,color,reason=status_from_metrics(eff,hps,mps,state.miss_trend)
-        safe_addstr(stdscr, info_y, 1, f"{tr(state, 'health')} | {tr(state, 'score')} {score_text} {localize_status(state, report['status'])} | {tr(state, 'primary_alert')}: {localize_status(state, status)} ({localize_reason(state, reason)})", color)
-        info_y += 1
-        eff_arrow = trend_arrow(eff, eff_baseline) if eff is not None and eff_baseline is not None else "→"
-        ratio_arrow = trend_arrow(mps, avg_m) if sysfs_ok else ""
-        if not tiny_mode:
-            miss_hit_label = "Fehltreffer/Treffer" if is_german(state) else "MISS/HIT"
-            health_text = f"{tr(state, 'health')} | EFF {eff_text}{eff_arrow} {tr(state, 'critical_short')}<{EFF_CRITICAL_THRESHOLD:.0f} | {miss_hit_label} {ratio_text}{ratio_arrow} {tr(state, 'critical_short')}≥{MISS_HIT_RATIO_CRITICAL:.2f}"
-            safe_addstr(stdscr, info_y, 1, health_text, color)
-            info_y += 1
-        if len(state.hits) >= 10 and len(state.miss) >= 10:
-            short_h = sum(list(state.hits)[-10:]) / 10
-            short_m = sum(list(state.miss)[-10:]) / 10
-        else:
-            short_h = avg_h
-            short_m = avg_m
-        if not compact_mode:
-            short_text = (
-                f"{tr(state, 'hit_short')}:{short_h:.0f}/s  {tr(state, 'miss_short')}:{short_m:.0f}/s  Δ{tr(state, 'miss_short')}:{format_delta_pct_display(state, short_m, avg_m)} {tr(state, 'vs_window')}"
-                if sysfs_ok
-                else unavailable_value(state)
-            )
-            safe_addstr(stdscr, info_y, 1, f"{tr(state, 'avg_10s')} -> {short_text}", 4)
-            info_y += 1
-
-        if compact_mode:
-            safe_addstr(stdscr, graph_y + graph_h + 4, 1, tr(state, "compact_mode"), 3)
-            if state.update_notice: safe_addstr(stdscr,maxy-2,1,state.update_notice,3)
-            if state.config_notice: safe_addstr(stdscr,maxy-2,1,localize_message(state, state.config_notice),3)
-            elif state.device_warning: safe_addstr(stdscr,maxy-2,1,localize_message(state, state.device_warning),3)
-            safe_addstr(stdscr,maxy-1,1,tr(state, "footer"),4)
-            stdscr.refresh()
-            action = handle_keypress(stdscr.getch(), state)
-            if action == "quit": break
-            if action == "settings": draw_settings(stdscr, state)
-            if action == "info": draw_info(stdscr, state)
-            time.sleep(FRAME_SECONDS)
-            continue
-
-        # -------- CONTAINERS --------
-        y = max(info_y + 1, graph_y + graph_h + 5)
-        stats_right_x = 32 if maxx >= 100 else max(1, maxx // 2)
-        safe_addstr(stdscr,y,1,tr(state, "cache_numbers"),4)
-        y += 1
-        hits_text = f"{h0:,}" if h0 is not None else unavailable_value(state)
-        misses_text = f"{m0:,}" if m0 is not None else unavailable_value(state)
-        safe_addstr(stdscr,y,1,f"{tr(state, 'total_hits')}:   {hits_text}")
-        safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'total_misses')}: {misses_text}")
-        y += 1
-        efficiency_detail = f"{eff:6.2f}%" if eff is not None else unavailable_value(state)
-        safe_addstr(stdscr,y,1,f"{tr(state, 'efficiency')}:   {efficiency_detail}")
-        safe_addstr(stdscr,y,stats_right_x,f"{('Fehlt./Treff.' if is_german(state) else 'Miss/Hit')}:     {ratio_text}")
-        y += 1
-        safe_addstr(stdscr,y,1,f"{tr(state, 'peak_hit')}:   {max_h:>6}")
-        safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'peak_miss')}:  {max_m:>6}")
-        y += 1
-        safe_addstr(stdscr,y,1,f"{tr(state, 'mode')}:         {format_cache_mode_display(state, details['cache_mode'])}")
-        safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'wb_target')}:    {format_io_rate_display(state, details['writeback_rate_bytes'])}")
-        y += 1
-        flush_source = (
-            tr(state, "flush_source_wb")
-            if details.get("writeback_rate_bytes")
-            else (tr(state, "flush_source_backing") if state.backing_write_rate_bytes else "")
-        )
-        flush_suffix = f" ({flush_source})" if flush_seconds is not None and flush_source else ""
-        safe_addstr(stdscr,y,1,f"{tr(state, 'flush_eta')}:    {format_duration_display(state, flush_seconds)}{flush_suffix}")
-        safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'ssd_life')}:     {format_pct_display(state, smart_health.get('life_remaining_percent'))}")
-        y += 1
-        safe_addstr(stdscr,y,1,f"{tr(state, 'ssd_temp')}:     {(str(smart_health.get('temperature_c')) + ' °C') if smart_health.get('temperature_c') is not None else unavailable_value(state)}")
-        safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'ssd_tbw')}:      {format_bytes_display(state, smart_health.get('tbw_bytes'))}")
-        y += 1
-        safe_addstr(stdscr,y,1,f"{tr(state, 'wb_percent')}:   {value_or_unavailable(state, details['writeback_percent'])}")
-        safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'hdd_write')}:    {format_io_rate_display(state, state.backing_write_rate_bytes)}")
-        y += 1
-        safe_addstr(stdscr,y,1,f"{tr(state, 'wb_running')}:   {value_or_unavailable(state, details['writeback_running'])}")
-        y += 1
-        safe_addstr(stdscr,y,1,f"{tr(state, 'ssd_cache')}:    {format_bytes_display(state, details['cache_capacity'])}")
-        safe_addstr(stdscr,y,stats_right_x,f"{tr(state, 'avail_wb')}:     {format_pct_display(state, details['cache_available_percent'])} {format_bytes_display(state, details['cache_available_bytes'])}")
-        y += 1
-        fs_usage = details['fs_usage']
-        hdd_text = format_bytes_display(state, fs_usage['total']) if fs_usage else format_bytes_display(state, details['backing_size'])
-        hdd_used = f"{tr(state, 'used')} {format_bytes_display(state, fs_usage['used'])} {tr(state, 'free')} {format_bytes_display(state, fs_usage['free'])}" if fs_usage else tr(state, "used_free_unavailable")
-        safe_addstr(stdscr,y,1,f"{tr(state, 'hdd_backing')}:  {hdd_text}")
-        safe_addstr(stdscr,y,stats_right_x,hdd_used)
-        y += 1
-        if y < maxy - 5:
-            safe_addstr(stdscr,y,1,(tr(state, "recommend") + ": " + localize_message(state, recs[0]))[:maxx-2],3 if score is None or score < 80 else 2)
-            y += 1
-        diag = automatic_diagnosis(state.eff_history, eff, hps, mps, details, smart_health, state.docker_io_rates)
-        anomaly = detect_anomalies(list(state.backing_write_history)[:-1], state.backing_write_rate_bytes)
-        if y < maxy - 6:
-            diagnosis_text = localize_message(state, diag["recommendation"]) if diag["problem"] else tr(state, "no_problem")
-            safe_addstr(stdscr,y,1,(tr(state, "diagnosis_title") + ": " + diagnosis_text)[:maxx-2],3 if diag["problem"] else 2)
-            y += 1
-        if anomaly.get("anomaly") and y < maxy - 6:
-            safe_addstr(stdscr,y,1,(tr(state, "anomaly") + ": " + localize_message(state, anomaly["message"]))[:maxx-2],1)
-            y += 1
-        if y < maxy - 6:
-            guard = maintenance_guard(details, smart_health)
-            safe_addstr(stdscr,y,1,(tr(state, "maintenance") + ": " + localize_message(state, guard["message"]))[:maxx-2],2 if guard["safe"] else 3)
-            y += 1
-        y += 1
-        safe_addstr(stdscr,y,1,tr(state, "containers_title"),4)
-        y+=1
-
-        selection_label = f"{len(state.selected_containers)} {tr(state, 'selected')}" if state.selected_containers else tr(state, "all_empty_selection")
-        safe_addstr(stdscr, y, 1, f"{tr(state, 'containers_title')}: {selection_label}", 4)
-        y += 1
-        data_line = f"{tr(state, 'data')}: SYSFS {'OK' if sysfs_ok else tr(state, 'missing')} | DOCKER {localize_command_status(state, state.docker_state)}"
-        if narrow_mode:
-            safe_addstr(stdscr, y, 1, data_line, 4)
-            y += 1
-        else:
-            safe_addstr(stdscr,y,32,data_line,4)
-            y += 1
-        for warning in dependency_summary_lines(smart_health, state.docker_state, docker_enabled(state), state):
-            if y >= maxy - 3:
-                break
-            safe_addstr(stdscr, y, 1, (f"{tr(state, 'dependency')}: " + warning)[:maxx-2], 3)
-            y += 1
-        if not docker_enabled(state) and y < maxy - 3:
-            safe_addstr(stdscr, y, 1, (f"{tr(state, 'dependency')}: " + tr(state, "docker_disabled_hint"))[:maxx-2], 3)
-            y += 1
-        for reason in missing_value_reasons(state, details, smart_health, state, sysfs_ok):
-            if y >= maxy - 3:
-                break
-            safe_addstr(stdscr, y, 1, (f"{tr(state, 'values_missing')}: " + reason)[:maxx-2], 3)
-            y += 1
-        y += 1
-        table_start_x = 1
-
-        table_usable_w = max(1, maxx - table_start_x - 1)
-        names = [name for name, _, _, _, _ in state.docker_cache] or [tr(state, "name")]
-        longest_name = max(len(n) for n in names)
-        name_col_w = min(max(12, longest_name + 2), max(12, int(table_usable_w * (0.35 if narrow_mode else 0.34))))
-        metrics_w = max(36, table_usable_w - name_col_w)
-        cpu_col_w = max(10, metrics_w // 3)
-        mem_col_w = max(10, metrics_w // 3)
-        io_col_w = max(10, metrics_w - cpu_col_w - mem_col_w)
-        min_col_w = 10
-        if cpu_col_w < min_col_w:
-            shift = min_col_w - cpu_col_w
-            cpu_col_w += shift
-            mem_col_w = max(min_col_w, mem_col_w - shift)
-        if mem_col_w < min_col_w:
-            mem_col_w = min_col_w
-        cpu_x = table_start_x + name_col_w
-        mem_x = cpu_x + cpu_col_w
-        io_x = mem_x + mem_col_w
-
-        safe_addstr(stdscr, y, table_start_x, f"{tr(state, 'name'):<{max(1, name_col_w-1)}}", 4)
-        safe_addstr(stdscr, y, cpu_x, "CPU", 4)
-        safe_addstr(stdscr, y, mem_x, tr(state, "ram"), 4)
-        safe_addstr(stdscr, y, io_x, tr(state, "disk"), 4)
-        y += 1
-        if (maxy - 2) - y < 1:
-            safe_addstr(stdscr, y, table_start_x, tr(state, "not_enough_space"), 3)
-        ranked_container_rows = sorted(
-            state.docker_cache,
-            key=lambda row: sum(value or 0 for value in state.docker_io_rates.get(row[0], (None, None))),
-            reverse=True,
-        )
-        for name,cpu,mem,mem_usage_raw,_block_io_raw in ranked_container_rows:
-            if y+1 >= maxy:
-                break
-            cpu_room = max(0, cpu_col_w - 10)
-            mem_room = max(0, mem_col_w - 11)
-            mem_bytes = parse_docker_mem_usage_bytes(mem_usage_raw)
-            mem_text = format_bytes_display(state, mem_bytes)
-
-            read_rate, write_rate = state.docker_io_rates.get(name, (None, None))
-            if io_col_w >= 26:
-                io_text = f"{tr(state, 'read_short')} {format_io_rate_display(state, read_rate)} {tr(state, 'write_short')} {format_io_rate_display(state, write_rate)}"
-            else:
-                total_rate = None if read_rate is None and write_rate is None else (read_rate or 0) + (write_rate or 0)
-                io_text = format_io_rate_display(state, total_rate)
-            bar_cpu, bar_cpu_empty = draw_meter(cpu, cpu_room, 2, empty_char=" ")
-            bar_mem, bar_mem_empty = draw_meter(mem, mem_room, 3, empty_char=" ")
-
-            max_name_len = max(6, name_col_w - 2)
-            disp_name = name if len(name) <= max_name_len else name[:max_name_len-1] + "…"
-            safe_addstr(stdscr,y,table_start_x,f"{disp_name:<{name_col_w-1}}")
-            safe_addstr(stdscr,y,cpu_x,f"{tr(state, 'cpu_short')} {cpu:5.1f}% ",6)
-            safe_addstr(stdscr,y,cpu_x + 9,bar_cpu,2)
-            safe_addstr(stdscr,y,cpu_x + 9 + len(bar_cpu),bar_cpu_empty,6)
-            safe_addstr(stdscr,y,mem_x,f"{tr(state, 'ram_short')} {mem_text:>8} ",6)
-            safe_addstr(stdscr,y,mem_x + 11,bar_mem,3)
-            safe_addstr(stdscr,y,mem_x + 11 + len(bar_mem),bar_mem_empty,6)
-            safe_addstr(stdscr,y,io_x,f"{tr(state, 'disk_short')} {io_text}",6)
-            y+=1
-        if state.update_notice: safe_addstr(stdscr,maxy-2,1,state.update_notice,3)
-        if state.config_notice: safe_addstr(stdscr,maxy-2,1,localize_message(state, state.config_notice),3)
-        elif state.device_warning: safe_addstr(stdscr,maxy-2,1,localize_message(state, state.device_warning),3)
-        safe_addstr(stdscr,maxy-1,1,tr(state, "footer"),4)
 
         stdscr.refresh()
 

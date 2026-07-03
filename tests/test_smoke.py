@@ -98,6 +98,211 @@ def test_draw_line_graph_does_not_draw_vertical_spike_bars_or_zero_baseline():
     assert all(row != 2 + 6 - 1 for row, _, _, _ in screen.draws)
 
 
+def test_dashboard_layout_uses_minimal_stacked_and_split_profiles():
+    minimal = bcache_monitor.dashboard_layout(12, 50)
+    stacked = bcache_monitor.dashboard_layout(24, 63)
+    split = bcache_monitor.dashboard_layout(38, 98)
+    wide = bcache_monitor.dashboard_layout(62, 190)
+
+    assert minimal.profile == "minimal"
+    assert minimal.show_graph is False
+    assert stacked.profile == "stacked"
+    assert stacked.graph_x + stacked.graph_w < 63
+    assert split.profile == "split"
+    assert split.graph_x + split.graph_w < split.side_x
+    assert split.side_x + split.side_w < 98
+    assert wide.graph_w < 190 * 0.70
+
+
+def test_pack_metric_rows_preserves_order_and_width():
+    rows = bcache_monitor.pack_metric_rows(
+        ["Modus: writeback", "Dirty: 12 MiB", "WB-Ziel: 4 MiB/s"],
+        30,
+    )
+
+    assert all(len(row) <= 30 for row in rows)
+    assert "Modus" in rows[0]
+    assert "WB-Ziel" in rows[-1]
+
+
+def _dashboard_fixture():
+    state = bcache_monitor.AppState(
+        config={
+            "language": "de",
+            "docker_enabled": True,
+            "containers": ["nextcloud_app", "immich-server"],
+        },
+        selected_containers=["nextcloud_app", "immich-server"],
+    )
+    state.device_name = "bcache0"
+    state.device_source = "auto"
+    state.sysfs_ok = True
+    state.current_hits = 488_312
+    state.current_misses = 183_697
+    state.current_hps = 7
+    state.current_mps = 1
+    state.current_eff = 72.66
+    state.hits.extend([0, 3, 7])
+    state.miss.extend([0, 0, 1])
+    state.miss_trend.extend([0, 0, 1])
+    state.eff_history.extend([72.4, 72.5, 72.66])
+    state.backing_write_rate_bytes = 11 * 1024
+    state.docker_state = "OK"
+    state.docker_cache = [
+        ("nextcloud_app", 0.8, 12.0, "174.7MiB / 1GiB", "2MiB / 4MiB"),
+        ("immich-server", 5.8, 45.0, "675.9MiB / 1GiB", "4MiB / 8MiB"),
+    ]
+    state.docker_io_rates = {
+        "nextcloud_app": (1024, 2048),
+        "immich-server": (4096, 8192),
+    }
+    details = bcache_monitor.empty_bcache_details()
+    details.update({
+        "cache_mode": "[writeback]",
+        "cache_capacity": 512 * 1024 ** 3,
+        "cache_available_percent": 93.0,
+        "cache_available_bytes": 476 * 1024 ** 3,
+        "dirty_bytes": 52 * 1024,
+        "backing_size": 2 * 1024 ** 4,
+        "fs_usage": {
+            "total": 2 * 1024 ** 4,
+            "used": 900 * 1024 ** 3,
+            "free": 1_148 * 1024 ** 3,
+        },
+        "writeback_percent": "5",
+        "writeback_rate_bytes": 4 * 1024 ** 2,
+        "writeback_running": "1",
+        "device_stat": {"read_sectors": 1, "write_sectors": 2},
+        "_core_available": True,
+    })
+    smart = {
+        **bcache_monitor.base_ssd_health(["sda"]),
+        "life_remaining_percent": 47,
+        "temperature_c": 36,
+        "tbw_bytes": 20 * 1024 ** 4,
+    }
+    report = bcache_monitor.health_report(
+        state.current_eff,
+        details,
+        smart,
+        state.current_hps,
+        state.current_mps,
+    )
+    recs = bcache_monitor.recommendations(state.current_eff, details, smart)
+    flush_seconds = bcache_monitor.estimate_flush_seconds(
+        details["dirty_bytes"],
+        details["writeback_rate_bytes"],
+    )
+    return state, details, smart, report, recs, flush_seconds
+
+
+@pytest.mark.parametrize("height,width", [(12, 50), (24, 63), (38, 98), (62, 190)])
+def test_render_dashboard_keeps_core_metrics_in_bounds_at_common_sizes(height, width):
+    screen = FakeScreen(height=height, width=width)
+    state, details, smart, report, recs, flush_seconds = _dashboard_fixture()
+
+    bcache_monitor.render_dashboard(
+        screen,
+        state,
+        details,
+        smart,
+        report,
+        recs,
+        flush_seconds,
+    )
+
+    rendered = "\n".join(text for _, _, text, _ in screen.draws)
+    assert "EFF 72.7%" in rendered
+    assert "LIVE T 7/s" in rendered
+    assert "Modus writeback" in rendered
+    assert "CACHE-WERTE" in rendered
+    assert any(row == height - 1 for row, _, _, _ in screen.draws)
+    assert all(0 <= row < height and 0 <= col < width for row, col, _, _ in screen.draws)
+    assert all(col + len(text) <= width for _, col, text, _ in screen.draws)
+
+
+def test_split_dashboard_uses_side_panel_and_still_shows_containers():
+    screen = FakeScreen(height=38, width=98)
+    state, details, smart, report, recs, flush_seconds = _dashboard_fixture()
+
+    bcache_monitor.render_dashboard(
+        screen,
+        state,
+        details,
+        smart,
+        report,
+        recs,
+        flush_seconds,
+    )
+
+    layout = bcache_monitor.dashboard_layout(38, 98)
+    assert any("CACHE-WERTE" in text and col == layout.side_x for _, col, text, _ in screen.draws)
+    assert any("nextcloud_app" in text for _, _, text, _ in screen.draws)
+
+
+@pytest.mark.parametrize("height,width", [(38, 98), (62, 190)])
+def test_larger_dashboards_keep_eight_ranked_containers_visible(height, width):
+    screen = FakeScreen(height=height, width=width)
+    state, details, smart, report, recs, flush_seconds = _dashboard_fixture()
+    original_rows = state.docker_cache * 4
+    state.docker_cache = [
+        (f"container-{index}", cpu, mem, mem_raw, io_raw)
+        for index, (_name, cpu, mem, mem_raw, io_raw) in enumerate(original_rows, 1)
+    ]
+    state.docker_io_rates = {
+        row[0]: (index * 1024, index * 2048)
+        for index, row in enumerate(state.docker_cache, 1)
+    }
+    state.selected_containers = [row[0] for row in state.docker_cache]
+
+    bcache_monitor.render_dashboard(
+        screen,
+        state,
+        details,
+        smart,
+        report,
+        recs,
+        flush_seconds,
+    )
+
+    rendered = "\n".join(text for _, _, text, _ in screen.draws)
+    assert all(f"container-{index}" in rendered for index in range(1, 9))
+    assert any("DIAGNOSE / HINWEIS" in text for _, _, text, _ in screen.draws) == (height >= 62)
+
+
+def test_compact_dashboard_prioritizes_top_io_containers_and_reserves_notice_row():
+    screen = FakeScreen(height=24, width=63)
+    state, details, smart, report, recs, flush_seconds = _dashboard_fixture()
+    state.config_notice = "Configuration saved."
+    original_rows = state.docker_cache * 4
+    state.docker_cache = [
+        (f"container-{index}", cpu, mem, mem_raw, io_raw)
+        for index, (_name, cpu, mem, mem_raw, io_raw) in enumerate(original_rows, 1)
+    ]
+    state.docker_io_rates = {
+        row[0]: (index * 1024, index * 2048)
+        for index, row in enumerate(state.docker_cache, 1)
+    }
+
+    bcache_monitor.render_dashboard(
+        screen,
+        state,
+        details,
+        smart,
+        report,
+        recs,
+        flush_seconds,
+    )
+
+    rendered = "\n".join(text for _, _, text, _ in screen.draws)
+    assert "container-8" in rendered
+    assert "container-7" in rendered
+    assert "container-1" not in rendered
+    assert {
+        text for row, _, text, _ in screen.draws if row == screen.height - 2
+    } == {"Configuration saved."}
+
+
 def test_status_from_metrics_ignores_miss_trend_when_idle():
     status, _color, reason = bcache_monitor.status_from_metrics(52.0, 0, 0, [0, 0, 0, 10, 10, 10])
 

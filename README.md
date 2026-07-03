@@ -9,6 +9,7 @@ A lightweight and fast **Linux bcache monitoring tool** for real-time performanc
 ## ✨ Features
 
 - 📊 Real-time bcache statistics
+- 🖥️ Responsive terminal layout for compact, medium, and wide windows
 - ⚡ Monitor SSD cache performance
 - 💾 Analyze HDD + SSD hybrid setups
 - 🧠 Simple CLI interface (no Python package dependencies)
