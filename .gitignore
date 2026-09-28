@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Test- und Lint-Caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Virtuelle Umgebungen
+.venv/
+venv/
+env/
+
+# Editoren und Betriebssystem
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Lokale Claude-Code-Einstellungen (nicht geteilt)
+.claude/settings.local.json
+
+# Laufzeitdaten des Monitors (falls lokal erzeugt)
+history.csv

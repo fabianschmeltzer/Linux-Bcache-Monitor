@@ -1085,6 +1085,22 @@ def discover_cache_set_path(bcache_path):
     return ""
 
 
+def cache_member_paths(cache_set_path):
+    """Return the cache member directories (cache0, cache1, ...) of a bcache cache set.
+
+    A cache set directory also contains plain attribute files whose names start
+    with "cache" (e.g. cache_available_percent), so a bare "cache*" glob must
+    not be used here.
+    """
+    if not cache_set_path:
+        return []
+    members = []
+    for path in sorted(glob.glob(os.path.join(cache_set_path, "cache[0-9]*"))):
+        if os.path.isdir(path):
+            members.append(path)
+    return members
+
+
 def block_name_from_bcache_link(path):
     if not path:
         return ""
@@ -1152,7 +1168,7 @@ def discover_bcache_topology(device_name, bcache_path):
 
     cache_blocks = []
     if topology.cache_set_path:
-        for cache_link in sorted(glob.glob(os.path.join(topology.cache_set_path, "cache*"))):
+        for cache_link in cache_member_paths(topology.cache_set_path):
             name = block_name_from_bcache_link(cache_link)
             if name:
                 cache_blocks.append(name)
@@ -1175,7 +1191,7 @@ def read_cache_device_capacity(cache_set_path):
     if not cache_set_path:
         return None
     capacities = []
-    for cache_path in sorted(glob.glob(os.path.join(cache_set_path, "cache*"))):
+    for cache_path in cache_member_paths(cache_set_path):
         bucket_size = parse_sysfs_size_bytes(read(os.path.join(cache_path, "bucket_size")))
         buckets = read_int_file(os.path.join(cache_path, "nbuckets"))
         if bucket_size is not None and buckets is not None:
@@ -1328,7 +1344,7 @@ def discover_cache_device_names(cache_set_path):
     if not cache_set_path:
         return []
     devices = []
-    for cache_path in sorted(glob.glob(os.path.join(cache_set_path, "cache*"))):
+    for cache_path in cache_member_paths(cache_set_path):
         name = block_name_from_bcache_link(cache_path)
         if name:
             devices.extend(leaf_block_devices(name))
