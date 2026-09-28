@@ -135,7 +135,7 @@ Version 0.9.0 fixes human-readable `writeback_rate` values, physical backing-dev
 
 ## ℹ️ Info, credits, and legal notes
 
-- **Version:** 0.9.0
+- **Version:** 0.9.1
 - **Credits:** by Fabian Schmeltzer
 - **AI note:** This program was written with AI assistance and may contain errors. Please verify critical output and use this tool at your own risk.
 - **Bug reports:** Please submit bugs and improvement suggestions via GitHub Issues: <https://github.com/fabianschmeltzer/Linux-Bcache-Monitor/issues>

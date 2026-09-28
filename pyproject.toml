@@ -1,0 +1,7 @@
+# Das Projekt ist ein einzelnes ausführbares Skript (bcache-monitor) ohne
+# Python-Paketstruktur. Diese Datei bündelt nur die Werkzeugkonfiguration.
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = "-q"

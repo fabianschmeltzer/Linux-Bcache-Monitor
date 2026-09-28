@@ -52,13 +52,13 @@ def test_version_metadata_is_in_sync():
     version = (repo_root / "VERSION").read_text().strip()
     readme = (repo_root / "README.md").read_text(encoding="utf-8")
 
-    assert bcache_monitor.__version__ == version == "0.9.0"
+    assert bcache_monitor.__version__ == version == "0.9.1"
     assert f"**Version:** {version}" in readme
 
 
 def test_print_version_and_exit_for_cli_flag(capsys):
     assert bcache_monitor.print_version_and_exit_if_requested(["bcache-monitor", "--version"]) is True
-    assert capsys.readouterr().out.strip() == "0.9.0"
+    assert capsys.readouterr().out.strip() == "0.9.1"
 
 
 def test_info_lines_include_bugreport_and_ai_notice():
@@ -368,7 +368,6 @@ def test_parse_mountinfo_lines_matches_direct_device():
     assert bcache_monitor._parse_mountinfo_lines(lines, "bcache0") == [("/data", "/dev/bcache0")]
 
 
-
 def test_efficiency_label_classifies_low_cache_benefit():
     assert bcache_monitor.efficiency_label(94) == "Sehr gut"
     assert bcache_monitor.efficiency_label(22) == "Cache bringt kaum Nutzen"
@@ -490,7 +489,10 @@ def test_smart_dependency_hint_recommends_nvme_cli_for_nvme_cache():
 
 
 def test_dependency_warnings_include_missing_docker_cli_and_ssd_hint():
-    smart = bcache_monitor.base_ssd_health(["sda"], dependency_hint="Install smartmontools (smartctl) to show SATA/SAS SSD health values.")
+    smart = bcache_monitor.base_ssd_health(
+        ["sda"],
+        dependency_hint="Install smartmontools (smartctl) to show SATA/SAS SSD health values.",
+    )
     warnings = bcache_monitor.dependency_warnings(smart, "NOT INSTALLED")
 
     assert any("smartmontools" in warning for warning in warnings)
@@ -498,7 +500,9 @@ def test_dependency_warnings_include_missing_docker_cli_and_ssd_hint():
 
 
 def test_config_language_sanitizes_and_translates_labels():
-    cfg = bcache_monitor._sanitize_config({"language": "en", "containers": [], "bcache_device": "bcache0", "docker_enabled": False})
+    cfg = bcache_monitor._sanitize_config(
+        {"language": "en", "containers": [], "bcache_device": "bcache0", "docker_enabled": False}
+    )
 
     assert cfg["language"] == "en"
     assert cfg["docker_enabled"] is False

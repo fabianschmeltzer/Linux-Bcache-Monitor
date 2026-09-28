@@ -1,0 +1,12 @@
+# Entspricht den Einstellungen des CI-Workflows .github/workflows/python-package.yml.
+[flake8]
+max-line-length = 127
+max-complexity = 10
+exclude =
+    .git,
+    __pycache__,
+    .pytest_cache,
+    .venv,
+    venv,
+    build,
+    dist
